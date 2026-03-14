@@ -20,7 +20,7 @@ import networkx as nx
 
 import store
 import vector_store
-from config import ENTITY_BOOST, SIMILARITY_THRESHOLD
+from config import ENTITY_BOOST, MAX_GRAPH_NEIGHBOURS, SIMILARITY_THRESHOLD
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -64,19 +64,35 @@ def build_graph() -> nx.Graph:
     # Build edges only for files with embeddings
     paths_with_embeddings = [p for p in G.nodes if p in embeddings]
 
+    # Pass 1: collect all (similarity, neighbour) pairs above threshold for every node.
+    # Using a dict so each node accumulates its own candidate list independently.
+    candidates: dict[str, list[tuple[float, str]]] = {p: [] for p in paths_with_embeddings}
+
     for i, path_a in enumerate(paths_with_embeddings):
         emb_a = embeddings[path_a]
-        ent_a = G.nodes[path_a]["entities"]
-
-        for path_b in paths_with_embeddings[i + 1 :]:
-            emb_b = embeddings[path_b]
-            sim = _cosine(emb_a, emb_b)
-
+        for path_b in paths_with_embeddings[i + 1:]:
+            sim = _cosine(emb_a, embeddings[path_b])
             if sim >= SIMILARITY_THRESHOLD:
-                ent_b = G.nodes[path_b]["entities"]
-                shared = _shared_entity_count(ent_a, ent_b)
-                weight = sim + shared * ENTITY_BOOST
-                G.add_edge(path_a, path_b, weight=weight, similarity=sim, shared_entities=shared)
+                candidates[path_a].append((sim, path_b))
+                candidates[path_b].append((sim, path_a))
+
+    # Pass 2: for each node keep only its top-MAX_GRAPH_NEIGHBOURS candidates
+    # (ordered by similarity descending) then add those edges to the graph.
+    # A set tracks already-added pairs so we don't add the same edge twice.
+    seen: set[tuple[str, str]] = set()
+
+    for path_a, nbrs in candidates.items():
+        top = sorted(nbrs, reverse=True)[:MAX_GRAPH_NEIGHBOURS]  # sort by sim descending
+        for sim, path_b in top:
+            key = (min(path_a, path_b), max(path_a, path_b))
+            if key in seen:
+                continue
+            seen.add(key)
+            ent_a = G.nodes[path_a]["entities"]
+            ent_b = G.nodes[path_b]["entities"]
+            shared = _shared_entity_count(ent_a, ent_b)
+            weight = sim + shared * ENTITY_BOOST
+            G.add_edge(path_a, path_b, weight=weight, similarity=sim, shared_entities=shared)
 
     return G
 
