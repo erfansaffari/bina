@@ -33,8 +33,6 @@ from rich import box
 import store
 import vector_store
 from config import BINA_HOME, SUPPORTED_EXTENSIONS, WATCHED_FOLDER_FILE
-from graph import build_graph
-from watcher import FolderWatcher
 
 console = Console()
 
@@ -65,31 +63,23 @@ def _load_watched_folder() -> Path | None:
 
 
 def _status_table() -> Table:
-    total = store.get_file_count()
-    ok = store.get_ok_count()
+    all_files = store.get_all_files()
+    total = len(all_files)
+    ok = sum(1 for f in all_files if f.status == "done")
     vectors = vector_store.count()
+    workspaces = store.list_workspaces()
 
     watched = _load_watched_folder()
-
-    G = build_graph()
-    nodes = G.number_of_nodes()
-    edges = G.number_of_edges()
-    degrees = [d for _, d in G.degree()]
-    avg_degree = f"{sum(degrees)/len(degrees):.1f}" if degrees else "0"
-    isolated = sum(1 for d in degrees if d == 0)
 
     table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     table.add_column("Key", style="bold cyan")
     table.add_column("Value", style="white")
 
+    table.add_row("Workspaces", str(len(workspaces)))
     table.add_row("Watched folder", str(watched) if watched else "[dim]not set[/dim]")
     table.add_row("Files indexed", str(ok))
     table.add_row("Files failed", str(total - ok))
     table.add_row("Vectors in index", str(vectors))
-    table.add_row("Graph nodes", str(nodes))
-    table.add_row("Graph edges", str(edges))
-    table.add_row("Avg connections/node", avg_degree)
-    table.add_row("Isolated nodes", str(isolated))
     table.add_row("Data directory", str(BINA_HOME))
 
     return table
@@ -108,8 +98,20 @@ def cli() -> None:
 @click.argument("folder", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def index(folder: Path) -> None:
     """Scan FOLDER, index all supported files, then watch for changes."""
+    import pipeline as _pipeline
+    from watcher import FolderWatcher
+
     folder = folder.resolve()
     _save_watched_folder(folder)
+
+    # Get or create a workspace for this folder
+    workspaces = store.list_workspaces()
+    if workspaces:
+        workspace_id = workspaces[0].id
+    else:
+        ws = store.create_workspace(name=folder.name, emoji="📁")
+        workspace_id = ws.id
+    store.add_folder_to_workspace(workspace_id, str(folder))
 
     files = _collect_files(folder)
     ext_list = ", ".join(sorted(SUPPORTED_EXTENSIONS))
@@ -127,16 +129,14 @@ def index(folder: Path) -> None:
         console.print("[yellow]No supported files found. Nothing to index.[/yellow]")
         return
 
-    import pipeline as _pipeline
-
     processed = skipped = failed = 0
 
     def _on_event(result: dict) -> None:
-        status = result.get("status", "")
+        s = result.get("status", "")
         filename = Path(result["path"]).name
-        if status == "ok":
+        if s == "ok":
             console.print(f"  [green]✓[/green] [dim]{filename}[/dim]")
-        elif status == "failed":
+        elif s == "failed":
             console.print(f"  [red]✗[/red] [dim]{filename}[/dim] — {result.get('error', '')}")
 
     with Progress(
@@ -152,17 +152,16 @@ def index(folder: Path) -> None:
 
         for file_path in files:
             progress.update(task, description=f"[cyan]{file_path.name[:40]}")
-            result = _pipeline.process_file(file_path)
-            status = result.get("status", "")
-            if status == "ok":
+            result = _pipeline.process_file(str(file_path), workspace_id)
+            s = result.get("status", "")
+            if s == "ok":
                 processed += 1
-            elif status == "skipped":
+            elif s == "skipped":
                 skipped += 1
             else:
                 failed += 1
             progress.advance(task)
 
-    # Free LLM from RAM now that indexing is done — embed model stays for search
     with console.status("[dim]Freeing AI memory…[/dim]", spinner="dots"):
         _pipeline.unload_models()
 
@@ -173,21 +172,19 @@ def index(folder: Path) -> None:
     )
     console.print()
 
-    # Build graph to confirm it works
-    with console.status("[dim]Building knowledge graph…[/dim]", spinner="dots"):
-        G = build_graph()
-    console.print(
-        f"[dim]Knowledge graph: {G.number_of_nodes()} nodes · {G.number_of_edges()} edges[/dim]"
-    )
-    console.print()
-
     # Start FSEvents watcher
     console.print(
         f"[bold]Watching[/bold] [dim]{folder}[/dim] for changes. "
         f"Press [bold]Ctrl+C[/bold] to stop.\n"
     )
 
-    watcher = FolderWatcher(folder, on_processed=_on_event)
+    watcher = FolderWatcher(
+        workspace_id=workspace_id,
+        folder_path=folder,
+        pipeline_fn=_pipeline.process_file,
+        remove_fn=_pipeline.remove_file,
+        on_processed=_on_event,
+    )
     watcher.start()
 
     try:
@@ -222,11 +219,31 @@ def status() -> None:
 
 
 @cli.command()
+@click.confirmation_option(
+    prompt="This will delete ALL indexed data in ~/.bina/. Are you sure?"
+)
+def reset() -> None:
+    """Wipe all indexed data and start fresh."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent / "backend"))
+    from reset import reset as do_reset
+    do_reset()
+
+
+@cli.command()
 def reindex() -> None:
     """Force re-process all files in the watched folder, ignoring hash cache."""
+    import pipeline as _pipeline
+
     watched = _load_watched_folder()
     if watched is None:
         console.print("[red]No watched folder set. Run [bold]bina index <folder>[/bold] first.[/red]")
+        sys.exit(1)
+
+    workspaces = store.list_workspaces()
+    workspace_id = workspaces[0].id if workspaces else None
+    if not workspace_id:
+        console.print("[red]No workspace found. Run [bold]bina index <folder>[/bold] first.[/red]")
         sys.exit(1)
 
     files = _collect_files(watched)
@@ -243,8 +260,6 @@ def reindex() -> None:
         console.print("[yellow]No supported files found.[/yellow]")
         return
 
-    import pipeline as _pipeline
-
     processed = failed = 0
 
     with Progress(
@@ -260,14 +275,13 @@ def reindex() -> None:
 
         for file_path in files:
             progress.update(task, description=f"[yellow]{file_path.name[:40]}")
-            result = _pipeline.process_file(file_path, force=True)
+            result = _pipeline.process_file(str(file_path), workspace_id, force=True)
             if result.get("status") == "ok":
                 processed += 1
             else:
                 failed += 1
             progress.advance(task)
 
-    # Free LLM from RAM immediately — saves ~2 GB after reindex completes
     with console.status("[dim]Freeing AI memory…[/dim]", spinner="dots"):
         _pipeline.unload_models()
 

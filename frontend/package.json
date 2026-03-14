@@ -11,12 +11,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "d3": "^7.9.0",
+    "lucide-react": "^0.441.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-force-graph-2d": "^1.25.5",
-    "lucide-react": "^0.441.0"
+    "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@types/d3": "^7.4.3",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
@@ -35,7 +38,10 @@
     "productName": "Bina",
     "mac": {
       "category": "public.app-category.productivity",
-      "target": ["dmg", "zip"]
+      "target": [
+        "dmg",
+        "zip"
+      ]
     },
     "files": [
       "dist/**/*",
@@ -45,7 +51,11 @@
       {
         "from": "../",
         "to": "backend",
-        "filter": ["**/*.py", ".venv/**/*", "requirements.txt"]
+        "filter": [
+          "**/*.py",
+          ".venv/**/*",
+          "requirements.txt"
+        ]
       }
     ]
   }

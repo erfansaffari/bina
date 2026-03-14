@@ -1,34 +1,67 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Lock, Zap, Brain, Folder, ChevronRight, Shield, Eye, HardDrive } from 'lucide-react'
-import { api, openFolder } from '../api'
+import { api, workspacesApi, openFolder } from '../api'
+import { useAppStore } from '../store/appStore'
+
+const EMOJIS = ['📁', '📚', '💼', '🔬', '🎨', '📝', '🧪', '📊', '🗂️', '🔒', '💡', '🌍', '🎯', '📐', '🏗️', '🧠', '📌', '🗃️', '🔖', '✏️']
+const COLOURS = ['#4F46E5', '#0D9488', '#D97706', '#DC2626', '#7C3AED', '#DB2777']
 
 interface Props {
-  onComplete: (folder: string) => void
+  onComplete: () => void
 }
 
-type Step = 'welcome' | 'privacy' | 'model' | 'folder'
+type Step = 'welcome' | 'privacy' | 'model' | 'folder' | 'workspace'
 
 export default function Onboarding({ onComplete }: Props) {
   const [step, setStep] = useState<Step>('welcome')
   const [model, setModel] = useState<'fast' | 'smart'>('fast')
   const [folder, setFolder] = useState<string | null>(null)
+  const [wsName, setWsName] = useState('')
+  const [wsEmoji, setWsEmoji] = useState('📁')
+  const [wsColour, setWsColour] = useState('#4F46E5')
   const [indexing, setIndexing] = useState(false)
+  const { setActiveWorkspace, loadWorkspaces } = useAppStore()
+  const nameRef = useRef<HTMLInputElement>(null)
+
+  const steps: Step[] = ['welcome', 'privacy', 'model', 'folder', 'workspace']
 
   async function handlePickFolder() {
     const picked = await openFolder()
-    if (picked) setFolder(picked)
+    if (picked) {
+      setFolder(picked)
+      // Pre-fill workspace name with folder basename
+      const basename = picked.split('/').pop() || picked
+      setWsName(basename)
+    }
   }
 
   async function handleStart() {
-    if (!folder) return
+    if (!folder || !wsName.trim()) return
     setIndexing(true)
     try {
-      await api.index(folder)
-      await api.watch(folder)
-      onComplete(folder)
+      // Create workspace
+      const ws = await workspacesApi.create(wsName.trim(), wsEmoji, wsColour)
+      // Add folder — this also starts the watcher and background scan
+      await workspacesApi.addFolder(ws.id, folder)
+      // Persist active workspace
+      setActiveWorkspace(ws.id)
+      try { localStorage.setItem('bina_active_workspace', ws.id) } catch {}
+      await loadWorkspaces()
+      onComplete()
     } catch {
       setIndexing(false)
     }
+  }
+
+  function goToWorkspaceStep() {
+    if (!folder) return
+    // Pre-fill name from folder basename
+    if (!wsName) {
+      const basename = folder.split('/').pop() || folder
+      setWsName(basename)
+    }
+    setStep('workspace')
+    setTimeout(() => nameRef.current?.focus(), 50)
   }
 
   return (
@@ -39,7 +72,7 @@ export default function Onboarding({ onComplete }: Props) {
       <div className="flex flex-1 flex-col items-center justify-center px-12 animate-fade-in no-drag">
         {/* Step indicator */}
         <div className="flex gap-2 mb-12">
-          {(['welcome', 'privacy', 'model', 'folder'] as Step[]).map((s, i) => (
+          {steps.map((s) => (
             <div
               key={s}
               className={`h-1 rounded-full transition-all duration-500 ${
@@ -202,18 +235,98 @@ export default function Onboarding({ onComplete }: Props) {
             </button>
 
             <button
+              onClick={goToWorkspaceStep}
+              disabled={!folder}
+              className="btn-primary w-full disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <span className="flex items-center justify-center gap-2">
+                Continue <ChevronRight className="w-4 h-4" />
+              </span>
+            </button>
+          </div>
+        )}
+
+        {/* Workspace naming */}
+        {step === 'workspace' && (
+          <div className="flex flex-col items-center text-center max-w-md animate-slide-up">
+            <div
+              className="w-16 h-16 rounded-2xl flex items-center justify-center mb-6 text-3xl"
+              style={{ backgroundColor: `${wsColour}20`, border: `1px solid ${wsColour}40` }}
+            >
+              {wsEmoji}
+            </div>
+            <h2 className="text-3xl font-display font-semibold text-bina-text mb-2">
+              Name your workspace
+            </h2>
+            <p className="text-bina-muted mb-8 text-sm leading-relaxed">
+              Workspaces keep your files organised. You can create as many as you need.
+            </p>
+
+            {/* Emoji picker */}
+            <div className="w-full mb-4">
+              <p className="text-bina-muted text-xs font-medium mb-2 text-left">Icon</p>
+              <div className="grid grid-cols-10 gap-1">
+                {EMOJIS.map((e) => (
+                  <button
+                    key={e}
+                    onClick={() => setWsEmoji(e)}
+                    className={`h-8 w-full rounded-lg flex items-center justify-center text-base transition-all ${
+                      wsEmoji === e
+                        ? 'bg-bina-accent/20 ring-1 ring-bina-accent scale-110'
+                        : 'hover:bg-bina-border/50'
+                    }`}
+                  >
+                    {e}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Name input */}
+            <div className="w-full mb-4">
+              <p className="text-bina-muted text-xs font-medium mb-2 text-left">Name</p>
+              <input
+                ref={nameRef}
+                type="text"
+                value={wsName}
+                onChange={(e) => setWsName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleStart()}
+                placeholder="Workspace name"
+                className="w-full bg-bina-bg border border-bina-border rounded-xl px-3 py-2.5 text-bina-text text-sm placeholder:text-bina-muted/50 focus:outline-none focus:border-bina-accent transition-colors"
+                maxLength={40}
+              />
+            </div>
+
+            {/* Colour picker */}
+            <div className="w-full mb-6">
+              <p className="text-bina-muted text-xs font-medium mb-2 text-left">Colour</p>
+              <div className="flex gap-2">
+                {COLOURS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setWsColour(c)}
+                    className={`w-8 h-8 rounded-full transition-all ${
+                      wsColour === c ? 'scale-125 ring-2 ring-offset-2 ring-offset-bina-bg ring-white/40' : 'hover:scale-110'
+                    }`}
+                    style={{ backgroundColor: c }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <button
               onClick={handleStart}
-              disabled={!folder || indexing}
+              disabled={!wsName.trim() || indexing}
               className="btn-primary w-full disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {indexing ? (
                 <span className="flex items-center justify-center gap-2">
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Starting…
+                  Setting up…
                 </span>
               ) : (
                 <span className="flex items-center justify-center gap-2">
-                  Start Understanding <ChevronRight className="w-4 h-4" />
+                  Start using Bina <ChevronRight className="w-4 h-4" />
                 </span>
               )}
             </button>

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { api } from './api'
+import { useEffect, useState } from 'react'
+import { apiGet } from './api'
 import Onboarding from './components/Onboarding'
 import MainLayout from './components/MainLayout'
 import type { AppScreen, StatusData } from './types'
@@ -7,26 +7,21 @@ import type { AppScreen, StatusData } from './types'
 export default function App() {
   const [screen, setScreen] = useState<AppScreen | null>(null)
   const [status, setStatus] = useState<StatusData | null>(null)
-  const watcherStarted = useRef(false)
 
   useEffect(() => {
-    api.status()
+    // Use the IPC bridge (apiGet) so the request goes through Electron's
+    // main process — avoids CSP restrictions on direct fetch() calls.
+    apiGet<{ total_workspaces: number }>('/global/status')
       .then((s) => {
-        setStatus(s)
-        if (s.watched_folder) {
-          // Restart the FSEvents watcher every time the app launches so that
-          // Finder deletions/additions are picked up even after a relaunch.
-          if (!watcherStarted.current) {
-            watcherStarted.current = true
-            api.watch(s.watched_folder).catch(() => {})
-          }
+        setStatus(null)
+        if (s.total_workspaces > 0) {
           setScreen('main')
         } else {
           setScreen('onboarding')
         }
       })
       .catch(() => {
-        // API not yet ready — retry
+        // API not yet ready — retry after short delay
         setTimeout(() => setScreen('onboarding'), 1500)
       })
   }, [])
@@ -45,7 +40,7 @@ export default function App() {
   if (screen === 'onboarding') {
     return (
       <Onboarding
-        onComplete={(folder) => {
+        onComplete={() => {
           setScreen('main')
         }}
       />

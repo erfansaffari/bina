@@ -1,0 +1,88 @@
+---
+description: Frontend conventions — D3 canvas graph, Zustand store, Electron IPC, event handling
+globs: frontend/src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend Patterns
+
+## Workspace state — always use Zustand
+
+```typescript
+// ✅ GOOD
+const activeWorkspaceId = useAppStore(s => s.activeWorkspaceId)
+
+// ❌ BAD — don't pass workspaceId as props through component trees
+```
+
+## API calls always pass workspaceId
+
+```typescript
+// ✅ GOOD
+api.graph(activeWorkspaceId)
+api.search(query, activeWorkspaceId)
+api.deleteFile(path, activeWorkspaceId)
+
+// ❌ BAD
+api.graph()
+```
+
+## Electron IPC bridge — never use raw fetch()
+
+All HTTP calls go through `apiGet / post / del` from `api.ts` which routes through
+`window.bina.api.*` IPC in Electron. Raw `fetch()` bypasses the bridge and hits CSP
+errors (`connect-src` only allows `localhost:8765`, not `127.0.0.1`).
+
+```typescript
+// ✅ GOOD
+import { apiGet } from '../api'
+const data = await apiGet<MyType>('/some/endpoint')
+
+// ❌ BAD — CSP violation in Electron
+fetch('http://127.0.0.1:8765/some/endpoint')
+```
+
+## D3 canvas graph — pointer events, not mouse events
+
+The `GraphCanvas` uses manual pan/zoom (no `d3-zoom`). Use `onPointerDown/Move/Up`
+so events fire before any third-party listeners and the 4px drag threshold works:
+
+```typescript
+// ✅ GOOD — 4px threshold prevents micro-movements from swallowing clicks
+if (!dragMovedRef.current && Math.sqrt(dx*dx + dy*dy) > 4) {
+  dragMovedRef.current = true
+}
+
+// ❌ BAD — any mousemove sets moved=true and kills the click
+const handleMouseMove = () => { dragMovedRef.current = true }
+```
+
+## Stale closure prevention — use refs for callbacks
+
+When a `useCallback(fn, [])` needs to call a prop or piece of state:
+
+```typescript
+// ✅ GOOD
+const onNodeClickRef = useRef(onNodeClick)
+useEffect(() => { onNodeClickRef.current = onNodeClick }, [onNodeClick])
+// inside useCallback(fn, []): onNodeClickRef.current(node)
+
+// ❌ BAD — onNodeClick captured at initial render, always stale
+const handler = useCallback(() => { onNodeClick(node) }, [])
+```
+
+## Graph node deletion — trigger immediate reload
+
+After deleting a file, call `onNodeDeleted()` to reload the graph immediately.
+Don't wait for the 5-second status poll.
+
+```typescript
+await api.deleteFile(node.path, activeWorkspaceId)
+onNodeDeletedRef.current?.()   // triggers loadFullGraph() in MainLayout
+```
+
+## GraphNode fields
+
+- `id` = MD5 hash (not path)
+- `community_id` = Louvain partition integer → maps to `COMMUNITY_PALETTE`
+- `forced` on edges = artificial edge for isolated nodes, render as dotted line

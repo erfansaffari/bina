@@ -182,6 +182,26 @@ ipcMain.handle('api:delete', async (_event, endpoint, body) => {
   }).then(r => r.json())
 })
 
+ipcMain.handle('api:patch', async (_event, endpoint, body) => {
+  return fetch(`${API_BASE}${endpoint}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json())
+})
+
+ipcMain.handle('dialog:confirm', async (_event, message, detail) => {
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Cancel', 'Delete Workspace'],
+    defaultId: 0,
+    cancelId: 0,
+    message,
+    detail,
+  })
+  return result.response === 1  // true = user confirmed delete
+})
+
 // ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------

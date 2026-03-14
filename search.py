@@ -25,7 +25,7 @@ from rich import box
 import store
 import vector_store
 from config import EMBED_MODEL, MAX_GRAPH_NEIGHBOURS
-from graph import build_graph, get_neighbours
+from graph import get_neighbours
 
 console = Console()
 
@@ -47,51 +47,66 @@ def _format_score(score: float) -> str:
     return f"{bar} {pct:3d}%"
 
 
-def search(query: str, G: nx.Graph, n_results: int = 20) -> list[dict]:
+def search(
+    query: str,
+    G: nx.Graph,
+    n_results: int = 20,
+    workspace_hashes: list[str] | None = None,
+) -> list[dict]:
     """
     Perform semantic search and graph expansion.
 
+    workspace_hashes: if provided, only documents with these hashes are
+    considered (workspace-scoped search).
+
     Returns a ranked list of result dicts:
-        rank, path, filename, doc_type, summary, score, from_graph
+        rank, hash, path, filename, doc_type, summary, score, from_graph
     """
     embedding = _embed_query(query)
-    raw_results = vector_store.query(embedding, n_results=n_results)
+    raw_results = vector_store.query(
+        embedding, n_results=n_results, hashes=workspace_hashes
+    )
 
     if not raw_results:
         return []
 
-    # Build a score map: path → best score so far
+    # Build a score map: hash → best score so far
     score_map: dict[str, dict] = {}
     for r in raw_results:
-        score_map[r["path"]] = {
+        score_map[r["hash"]] = {
+            "hash": r["hash"],
             "path": r["path"],
             "score": r["score"],
             "from_graph": False,
         }
 
     # Graph expansion: add 1st-degree neighbours with a discounted score
-    seed_paths = list(score_map.keys())
-    for path in seed_paths:
-        for nbr in get_neighbours(G, path, depth=MAX_GRAPH_NEIGHBOURS):
+    seed_hashes = list(score_map.keys())
+    for h in seed_hashes:
+        for nbr in get_neighbours(G, h, depth=MAX_GRAPH_NEIGHBOURS):
             if nbr not in score_map:
-                edge_data = G.get_edge_data(path, nbr, default={})
+                edge_data = G.get_edge_data(h, nbr, default={})
                 edge_weight = edge_data.get("weight", 0.0)
-                # Neighbour score: seed score × edge weight (capped at seed score)
-                neighbour_score = score_map[path]["score"] * edge_weight * 0.85
+                neighbour_score = score_map[h]["score"] * edge_weight * 0.85
+                # Resolve path for neighbour from graph node attributes
+                nbr_path = G.nodes[nbr].get("path", "") if nbr in G.nodes else ""
                 score_map[nbr] = {
-                    "path": nbr,
+                    "hash": nbr,
+                    "path": nbr_path,
                     "score": neighbour_score,
                     "from_graph": True,
                 }
 
     # Enrich with SQLite metadata
     results = []
-    for path, entry in score_map.items():
-        rec = store.get_file(path)
+    for h, entry in score_map.items():
+        rec = store.get_file_by_hash(h)
+        path = entry["path"] or (rec.path if rec else "")
         results.append(
             {
+                "hash": h,
                 "path": path,
-                "filename": Path(path).name,
+                "filename": Path(path).name if path else "",
                 "doc_type": (rec.doc_type if rec else "Unknown") or "Unknown",
                 "summary": (rec.summary if rec else "") or "",
                 "keywords": store.parse_keywords(rec) if rec else [],
@@ -175,8 +190,9 @@ def _open_file(path: str) -> None:
 
 def repl() -> None:
     """Launch the interactive search REPL."""
-    total = store.get_file_count()
-    ok = store.get_ok_count()
+    all_files = store.get_all_files()
+    total = len(all_files)
+    ok = sum(1 for f in all_files if f.status == "done")
 
     console.print()
     console.print(
@@ -196,9 +212,15 @@ def repl() -> None:
         )
         return
 
-    # Build graph once per REPL session
+    # Build graph once per REPL session — use first available workspace
+    from graph import get_graph as _get_graph
+    workspaces = store.list_workspaces()
     with console.status("[dim]Building knowledge graph…[/dim]", spinner="dots"):
-        G = build_graph()
+        if workspaces:
+            G = _get_graph(workspaces[0].id)
+        else:
+            import networkx as _nx
+            G = _nx.Graph()
 
     edge_count = G.number_of_edges()
     console.print(

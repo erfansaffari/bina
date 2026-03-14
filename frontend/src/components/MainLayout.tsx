@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api'
+import { useAppStore } from '../store/appStore'
 import SearchBar from './SearchBar'
 import GraphCanvas from './GraphCanvas'
 import Inspector from './Inspector'
 import Sidebar from './Sidebar'
-import type { GraphNode, GraphEdge, StatusData, ProgressData } from '../types'
+import WorkspaceSwitcher from './WorkspaceSwitcher'
+import WorkspaceModal from './WorkspaceModal'
+import type { GraphNode, GraphEdge, StatusData, ProgressData, Workspace } from '../types'
 
 interface Props {
   initialStatus: StatusData | null
@@ -12,32 +15,47 @@ interface Props {
 }
 
 export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
-  // Full graph – never replaced during a search (prevents flicker)
+  const { activeWorkspaceId, loadWorkspaces, workspaces } = useAppStore()
+
   const [fullNodes, setFullNodes] = useState<GraphNode[]>([])
   const [fullEdges, setFullEdges] = useState<GraphEdge[]>([])
-
-  // Search overlay: only scores change, topology stays the same
   const [searchScores, setSearchScores] = useState<Map<string, number> | null>(null)
-
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
-  const [status,   setStatus]   = useState<StatusData | null>(initialStatus)
+  const [status, setStatus] = useState<StatusData | null>(initialStatus)
   const [progress, setProgress] = useState<ProgressData | null>(null)
   const [searchMs, setSearchMs] = useState<number | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
 
-  // Track whether a graph load is in flight to avoid double-loads
-  const loadingGraph = useRef(false)
-  // Track last known node count so we can detect external changes (e.g. Finder deletions)
-  const prevGraphNodes = useRef<number | null>(null)
+  // Workspace modal state
+  const [wsModalOpen, setWsModalOpen] = useState(false)
+  const [wsToEdit, setWsToEdit] = useState<Workspace | null>(null)
 
-  const loadFullGraph = useCallback(async () => {
-    if (loadingGraph.current) return
+  const loadingGraph = useRef(false)
+  const prevGraphNodes = useRef<number | null>(null)
+  const prevWorkspaceId = useRef<string | null>(null)
+
+  // Load workspaces on mount
+  useEffect(() => {
+    loadWorkspaces()
+  }, [loadWorkspaces])
+
+  // Show WorkspaceModal if no workspaces exist after loading
+  useEffect(() => {
+    if (workspaces !== undefined && workspaces.length === 0) {
+      // Give loadWorkspaces time to complete before showing modal
+      const t = setTimeout(() => setWsModalOpen(true), 300)
+      return () => clearTimeout(t)
+    }
+  }, [workspaces])
+
+  const loadFullGraph = useCallback(async (workspaceId?: string) => {
+    const wsId = workspaceId ?? activeWorkspaceId
+    if (!wsId || loadingGraph.current) return
     loadingGraph.current = true
     try {
-      const g = await api.graph()
+      const g = await api.graph(wsId)
       setFullNodes(g.nodes)
       setFullEdges(g.edges)
-      // If the selected node was removed (file deleted), close the Inspector
       setSelectedNode(prev => {
         if (prev && !g.nodes.some(n => n.id === prev.id)) {
           setInspectorOpen(false)
@@ -47,17 +65,28 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
       })
     } catch {}
     loadingGraph.current = false
-  }, [])
+  }, [activeWorkspaceId])
 
-  // Load full graph on mount
-  useEffect(() => { loadFullGraph() }, [loadFullGraph])
-
-  // Poll status every 5 s; reload graph if the node count changed externally
-  // (e.g. a file was deleted from Finder and the watcher removed it from stores)
+  // Reload graph when active workspace changes
   useEffect(() => {
+    if (activeWorkspaceId && activeWorkspaceId !== prevWorkspaceId.current) {
+      prevWorkspaceId.current = activeWorkspaceId
+      prevGraphNodes.current = null
+      setFullNodes([])
+      setFullEdges([])
+      setSearchScores(null)
+      setSelectedNode(null)
+      setInspectorOpen(false)
+      loadFullGraph(activeWorkspaceId)
+    }
+  }, [activeWorkspaceId, loadFullGraph])
+
+  // Poll status every 5s; reload graph if node count changed
+  useEffect(() => {
+    if (!activeWorkspaceId) return
     const id = setInterval(async () => {
       try {
-        const s = await api.status()
+        const s = await api.status(activeWorkspaceId)
         setStatus(s)
         if (
           prevGraphNodes.current !== null &&
@@ -69,7 +98,7 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
       } catch {}
     }, 5000)
     return () => clearInterval(id)
-  }, [loadFullGraph])
+  }, [activeWorkspaceId, loadFullGraph])
 
   // Poll progress while indexing; reload graph when done
   const lastDoneRef = useRef(false)
@@ -81,8 +110,11 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
         if (p.done && !lastDoneRef.current) {
           lastDoneRef.current = true
           await loadFullGraph()
-          const s = await api.status()
-          setStatus(s)
+          if (activeWorkspaceId) {
+            const s = await api.status(activeWorkspaceId)
+            setStatus(s)
+            await loadWorkspaces()
+          }
         }
         if (!p.done) lastDoneRef.current = false
       } catch {}
@@ -90,66 +122,76 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
     poll()
     const id = setInterval(poll, 1500)
     return () => clearInterval(id)
-  }, [loadFullGraph])
+  }, [activeWorkspaceId, loadFullGraph, loadWorkspaces])
 
   const handleSearch = useCallback(async (q: string) => {
-    if (!q.trim()) {
+    if (!q.trim() || !activeWorkspaceId) {
       setSearchScores(null)
       setSearchMs(null)
       return
     }
     try {
-      const result = await api.search(q)
+      const result = await api.search(q, activeWorkspaceId)
       setSearchMs(result.ms)
 
-      // Build score map from search result nodes
       const scoreMap = new Map<string, number>()
       result.nodes.forEach(n => scoreMap.set(n.id, n.score))
       setSearchScores(scoreMap)
 
-      // Also update full graph nodes with refreshed scores/summaries
-      // (backend may have enriched data)
       setFullNodes(prev => prev.map(n => {
         const updated = result.nodes.find(r => r.id === n.id)
         return updated ? { ...n, score: updated.score, summary: updated.summary } : { ...n, score: 0 }
       }))
 
-      // Auto-select the top-scoring node
       if (result.nodes.length > 0) {
         const top = [...result.nodes].sort((a, b) => b.score - a.score)[0]
-        // Find in fullNodes to get complete data
         const fullNode = fullNodes.find(n => n.id === top.id) ?? top
         setSelectedNode({ ...fullNode, score: top.score })
         setInspectorOpen(true)
       }
     } catch {}
-  }, [fullNodes])
+  }, [activeWorkspaceId, fullNodes])
 
   const handleNodeClick = useCallback((node: GraphNode) => {
     setSelectedNode(node)
     setInspectorOpen(true)
   }, [])
 
+  function handleOpenEditWorkspace(ws: Workspace) {
+    setWsToEdit(ws)
+    setWsModalOpen(true)
+  }
+
+  function handleCloseWsModal() {
+    setWsModalOpen(false)
+    setWsToEdit(null)
+  }
+
   return (
     <div className="flex h-full bg-bina-bg overflow-hidden">
       {/* macOS traffic-light drag area */}
       <div className="absolute top-0 left-0 right-0 h-12 drag-region z-10" />
+
+      {/* Workspace switcher — leftmost column */}
+      <WorkspaceSwitcher
+        onCreateWorkspace={() => { setWsToEdit(null); setWsModalOpen(true) }}
+        onEditWorkspace={handleOpenEditWorkspace}
+      />
 
       {/* Sidebar */}
       <Sidebar
         status={status}
         progress={progress}
         onNeedOnboarding={onNeedOnboarding}
+        onGraphReload={loadFullGraph}
       />
 
       {/* Main area */}
       <div className="flex flex-1 flex-col min-w-0 relative">
-        {/* Search bar */}
         <div className="relative z-20 px-6 pt-14 pb-3 no-drag">
           <SearchBar onSearch={handleSearch} searchMs={searchMs} />
         </div>
 
-        {/* Graph canvas */}
         <div className="flex-1 relative no-drag">
           <GraphCanvas
             nodes={fullNodes}
@@ -157,10 +199,11 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
             selectedNodeId={selectedNode?.id ?? null}
             searchScores={searchScores}
             onNodeClick={handleNodeClick}
+            onNodeDeleted={loadFullGraph}
           />
 
           {/* Empty state */}
-          {fullNodes.length === 0 && !progress?.running && (
+          {fullNodes.length === 0 && !progress?.running && activeWorkspaceId && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="text-center animate-fade-in">
                 <p className="text-bina-muted text-lg font-display">No files indexed yet</p>
@@ -199,6 +242,14 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
         node={selectedNode}
         open={inspectorOpen}
         onClose={() => setInspectorOpen(false)}
+      />
+
+      {/* Workspace create/edit modal */}
+      <WorkspaceModal
+        open={wsModalOpen}
+        editWorkspace={wsToEdit}
+        onClose={handleCloseWsModal}
+        onCreated={() => loadFullGraph()}
       />
     </div>
   )

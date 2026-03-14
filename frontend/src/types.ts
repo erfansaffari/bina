@@ -1,24 +1,31 @@
 export interface GraphNode {
-  id: string
-  label: string
+  id: string        // file MD5 hash
+  name: string      // filename without path
+  path: string      // full absolute path
+  label: string     // same as name (kept for compat)
   summary: string
   keywords: string[]
   entities: Record<string, string[]>
   doc_type: string
-  status: 'ok' | 'failed'
+  status: 'done' | 'failed' | 'pending' | 'ok'
   score: number
+  relevance_score: number
   from_graph: boolean
-  // Injected by react-force-graph at runtime
+  community_id: number  // Louvain partition ID → maps to COMMUNITY_PALETTE
+  // Injected by D3 simulation at runtime
   x?: number
   y?: number
   vx?: number
   vy?: number
+  fx?: number | null
+  fy?: number | null
 }
 
 export interface GraphEdge {
   source: string | GraphNode
   target: string | GraphNode
   weight: number
+  forced?: boolean  // true = artificial edge for isolated node (rendered dotted)
 }
 
 export interface GraphData {
@@ -38,6 +45,7 @@ export interface StatusData {
   failed: number
   vectors: number
   watched_folder: string | null
+  watched_folders: string[]
   graph_nodes: number
   graph_edges: number
 }
@@ -50,6 +58,23 @@ export interface ProgressData {
   done: boolean
   ok: number
   failed: number
+}
+
+export interface Workspace {
+  id: string
+  name: string
+  emoji: string
+  colour: string
+  file_count: number
+  folder_count: number
+  created_at: string
+  last_opened: string
+}
+
+export interface WorkspaceFolder {
+  folder_path: string
+  file_count: number
+  added_at: string | null
 }
 
 export type AppScreen = 'onboarding' | 'main'

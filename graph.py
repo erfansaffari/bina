@@ -1,21 +1,25 @@
 """
-NetworkX knowledge graph.
+NetworkX knowledge graph — per-workspace singletons.
 
-build_graph() loads all processed files from SQLite + ChromaDB and creates
-a weighted undirected graph where:
+build_graph(workspace_id) loads files for that workspace from SQLite +
+ChromaDB and creates a weighted undirected graph where:
 
-  - Nodes: one per file (node ID = absolute path string)
-    Attributes: path, summary, keywords, entities, doc_type, status
+  - Nodes: one per file (node ID = MD5 hash)
+    Attributes: path, summary, keywords, entities, doc_type, status,
+                community_id (Louvain partition integer)
 
   - Edges: cosine similarity ≥ SIMILARITY_THRESHOLD
     Weight = cosine_similarity + ENTITY_BOOST per shared entity value
+    Isolated nodes (degree 0) receive one forced edge to their nearest
+    neighbour; these edges carry forced=True.
 
-The graph is kept in memory and rebuilt from scratch on each app launch
-(fast: <2s for 1 000 files; entity lookup is O(n²) but n is small).
+Graphs are kept in memory per workspace and rebuilt on demand when
+mark_dirty(workspace_id) is called.
 """
 from __future__ import annotations
 
 import threading
+from typing import Dict, Set
 
 import numpy as np
 import networkx as nx
@@ -24,41 +28,54 @@ import store
 import vector_store
 from config import ENTITY_BOOST, MAX_GRAPH_NEIGHBOURS, SIMILARITY_THRESHOLD
 
+try:
+    import community as community_louvain
+    _LOUVAIN_AVAILABLE = True
+except ImportError:
+    _LOUVAIN_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
-# Module-level graph cache (single source of truth for all callers)
+# Per-workspace graph cache
 # ---------------------------------------------------------------------------
 
-_G: nx.Graph | None = None
+_graphs: Dict[str, nx.Graph] = {}
+_dirty: Set[str] = set()
 _lock = threading.Lock()
 
 
-def get_graph() -> nx.Graph:
-    """Return the cached knowledge graph, rebuilding from stores if needed."""
-    global _G
+def get_graph(workspace_id: str) -> nx.Graph:
+    """Return the cached graph for workspace_id, rebuilding if dirty."""
     with _lock:
-        if _G is None:
-            _G = build_graph()
-    return _G
+        if workspace_id in _dirty or workspace_id not in _graphs:
+            _graphs[workspace_id] = _build_graph_locked(workspace_id)
+            _dirty.discard(workspace_id)
+        return _graphs[workspace_id]
 
 
-def mark_dirty() -> None:
-    """Invalidate the cache so the next get_graph() call rebuilds."""
-    global _G
+def mark_dirty(workspace_id: str) -> None:
+    """Invalidate the cached graph for workspace_id so it rebuilds on next access."""
     with _lock:
-        _G = None
+        _dirty.add(workspace_id)
 
 
-def remove_node_from_graph(path: str) -> None:
-    """Surgically remove one node from the cached graph without a full rebuild.
-
-    If the graph has not been built yet (e.g. early startup) this is a no-op;
-    the node simply won't appear when the graph is first constructed.
-    """
-    global _G
+def mark_all_dirty() -> None:
+    """Invalidate all cached workspace graphs."""
     with _lock:
-        if _G is not None and _G.has_node(path):
-            _G.remove_node(path)
+        _dirty.update(_graphs.keys())
 
+
+def remove_node_from_graph(workspace_id: str, file_hash: str) -> None:
+    """Surgically remove one node without a full rebuild."""
+    with _lock:
+        if workspace_id in _graphs:
+            G = _graphs[workspace_id]
+            if G.has_node(file_hash):
+                G.remove_node(file_hash)
+
+
+# ---------------------------------------------------------------------------
+# Graph construction helpers
+# ---------------------------------------------------------------------------
 
 def _cosine(a: list[float], b: list[float]) -> float:
     va = np.array(a, dtype=np.float32)
@@ -70,7 +87,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _shared_entity_count(entities_a: dict, entities_b: dict) -> int:
-    """Count the number of identical entity values shared between two files."""
+    """Count identical entity values shared between two files."""
     count = 0
     for key in ("persons", "companies", "projects", "locations"):
         set_a = {v.lower().strip() for v in entities_a.get(key, [])}
@@ -79,17 +96,21 @@ def _shared_entity_count(entities_a: dict, entities_b: dict) -> int:
     return count
 
 
-def build_graph() -> nx.Graph:
-    """Build and return the full knowledge graph from persisted data."""
+def _build_graph_locked(workspace_id: str) -> nx.Graph:
+    """Build and return the graph for workspace_id. Must be called inside _lock."""
     G = nx.Graph()
 
-    records = store.get_all_files()
-    embeddings = vector_store.get_all_embeddings()
+    records = store.get_files_for_workspace(workspace_id)
+    if not records:
+        return G
 
-    # Add nodes
+    hashes = [r.hash for r in records]
+    embeddings = vector_store.get_embeddings_by_hashes(hashes)
+
+    # Add nodes (ID = hash)
     for rec in records:
         G.add_node(
-            rec.path,
+            rec.hash,
             path=rec.path,
             summary=rec.summary or "",
             keywords=store.parse_keywords(rec),
@@ -99,61 +120,99 @@ def build_graph() -> nx.Graph:
         )
 
     # Build edges only for files with embeddings
-    paths_with_embeddings = [p for p in G.nodes if p in embeddings]
+    hashes_with_emb = [h for h in hashes if h in embeddings]
 
-    # Pass 1: collect all (similarity, neighbour) pairs above threshold for every node.
-    # Using a dict so each node accumulates its own candidate list independently.
-    candidates: dict[str, list[tuple[float, str]]] = {p: [] for p in paths_with_embeddings}
+    candidates: dict[str, list[tuple[float, str]]] = {h: [] for h in hashes_with_emb}
 
-    for i, path_a in enumerate(paths_with_embeddings):
-        emb_a = embeddings[path_a]
-        for path_b in paths_with_embeddings[i + 1:]:
-            sim = _cosine(emb_a, embeddings[path_b])
+    for i, hash_a in enumerate(hashes_with_emb):
+        emb_a = embeddings[hash_a]
+        for hash_b in hashes_with_emb[i + 1:]:
+            sim = _cosine(emb_a, embeddings[hash_b])
             if sim >= SIMILARITY_THRESHOLD:
-                candidates[path_a].append((sim, path_b))
-                candidates[path_b].append((sim, path_a))
+                candidates[hash_a].append((sim, hash_b))
+                candidates[hash_b].append((sim, hash_a))
 
-    # Pass 2: for each node keep only its top-MAX_GRAPH_NEIGHBOURS candidates
-    # (ordered by similarity descending) then add those edges to the graph.
-    # A set tracks already-added pairs so we don't add the same edge twice.
     seen: set[tuple[str, str]] = set()
 
-    for path_a, nbrs in candidates.items():
-        top = sorted(nbrs, reverse=True)[:MAX_GRAPH_NEIGHBOURS]  # sort by sim descending
-        for sim, path_b in top:
-            key = (min(path_a, path_b), max(path_a, path_b))
+    for hash_a, nbrs in candidates.items():
+        top = sorted(nbrs, reverse=True)[:MAX_GRAPH_NEIGHBOURS]
+        for sim, hash_b in top:
+            key = (min(hash_a, hash_b), max(hash_a, hash_b))
             if key in seen:
                 continue
             seen.add(key)
-            ent_a = G.nodes[path_a]["entities"]
-            ent_b = G.nodes[path_b]["entities"]
+            ent_a = G.nodes[hash_a]["entities"]
+            ent_b = G.nodes[hash_b]["entities"]
             shared = _shared_entity_count(ent_a, ent_b)
             weight = sim + shared * ENTITY_BOOST
-            G.add_edge(path_a, path_b, weight=weight, similarity=sim, shared_entities=shared)
+            G.add_edge(hash_a, hash_b, weight=weight, similarity=sim,
+                       shared_entities=shared, forced=False)
+
+    # ── Forced edges for isolated nodes (degree 0 → nearest neighbour) ────────
+    # These render as dotted lines and prevent isolated nodes piling at origin.
+    isolated = [h for h in hashes_with_emb if G.degree(h) == 0]
+    for iso_hash in isolated:
+        best_sim, best_hash = -1.0, None
+        for other_hash in hashes_with_emb:
+            if other_hash == iso_hash:
+                continue
+            sim = _cosine(embeddings[iso_hash], embeddings[other_hash])
+            if sim > best_sim:
+                best_sim = sim
+                best_hash = other_hash
+        if best_hash and best_sim > 0:
+            G.add_edge(iso_hash, best_hash,
+                       weight=float(best_sim), similarity=float(best_sim),
+                       shared_entities=0, forced=True)
+
+    # ── Community detection (Louvain) ─────────────────────────────────────────
+    if _LOUVAIN_AVAILABLE and G.number_of_edges() > 0:
+        try:
+            partition = community_louvain.best_partition(G, weight="weight")
+        except Exception:
+            partition = {n: 0 for n in G.nodes}
+    else:
+        # Fallback: assign each connected component its own community
+        partition = {}
+        for comp_id, component in enumerate(nx.connected_components(G)):
+            for node_hash in component:
+                partition[node_hash] = comp_id
+
+    for node_hash, comm_id in partition.items():
+        G.nodes[node_hash]["community_id"] = comm_id
 
     return G
 
 
-def get_neighbours(G: nx.Graph, path: str, depth: int = 1) -> set[str]:
-    """Return all nodes within `depth` hops of `path`."""
-    if path not in G:
+def build_graph(workspace_id: str) -> nx.Graph:
+    """Public alias — build (or return cached) graph for workspace_id."""
+    return get_graph(workspace_id)
+
+
+# ---------------------------------------------------------------------------
+# Graph traversal utilities
+# ---------------------------------------------------------------------------
+
+def get_neighbours(G: nx.Graph, node_id: str, depth: int = 1) -> set[str]:
+    """Return all nodes within `depth` hops of node_id."""
+    if node_id not in G:
         return set()
     neighbours: set[str] = set()
-    frontier = {path}
+    frontier = {node_id}
     for _ in range(depth):
         next_frontier: set[str] = set()
         for node in frontier:
             for nbr in G.neighbors(node):
-                if nbr not in neighbours and nbr != path:
+                if nbr not in neighbours and nbr != node_id:
                     next_frontier.add(nbr)
         neighbours |= next_frontier
         frontier = next_frontier
     return neighbours
 
 
-def subgraph_for_paths(G: nx.Graph, paths: list[str], expand_depth: int = 1) -> nx.Graph:
-    """Return an induced subgraph of the seed paths plus their neighbours."""
-    nodes: set[str] = set(paths)
-    for p in paths:
-        nodes |= get_neighbours(G, p, depth=expand_depth)
+def subgraph_for_paths(G: nx.Graph, node_ids: list[str], expand_depth: int = 1) -> nx.Graph:
+    """Return an induced subgraph of seed nodes plus their neighbours."""
+    nodes: set[str] = set(node_ids)
+    for nid in node_ids:
+        nodes |= get_neighbours(G, nid, depth=expand_depth)
     return G.subgraph(nodes).copy()

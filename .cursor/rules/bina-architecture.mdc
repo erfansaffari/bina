@@ -1,0 +1,44 @@
+---
+description: Core Bina architecture — workspaces, hash-based file IDs, multi-layer data stores
+alwaysApply: true
+---
+
+# Bina Architecture
+
+## Key invariants — never break these
+
+- **File identity = MD5 hash**, not path. `FileRecord.hash` is the primary key.
+- **Everything is workspace-scoped.** Every API endpoint, pipeline call, and graph operation takes a `workspace_id`.
+- **Three data stores must stay in sync:** SQLite (`store.py`), ChromaDB (`vector_store.py`), NetworkX in-memory graph (`graph.py`). A file exists in all three or none.
+- **Deduplication:** if two workspaces share a file with the same hash, only one `FileRecord` exists. `workspace_files` is the join table.
+
+## Data flow
+
+```
+pipeline.process_file(path, workspace_id)
+  → MD5 hash
+  → store.add_file_to_workspace()      # workspace_files row
+  → store.file_already_indexed(hash)?  # skip AI if true (dedup)
+  → extract + LLM + embed
+  → store.upsert_file()                # FileRecord status='done'
+  → vector_store.upsert(hash, …)
+  → graph.mark_dirty(workspace_id)
+```
+
+## Deletion
+
+```python
+pipeline.remove_file(path, workspace_id)
+  → store.remove_file_from_workspace()
+  → graph.mark_dirty(workspace_id)
+  → if store.count_workspace_refs(hash) == 0:
+      store.delete_file(hash)          # global purge
+      vector_store.delete(hash)
+```
+
+## Startup sequence (api.py lifespan)
+
+1. `store.init_db()`
+2. `_purge_orphans()` — remove records for files no longer on disk
+3. Restart watchers for all workspace folders
+4. `_resume_unfinished()` in background thread — re-index files with no `status='done'` record
