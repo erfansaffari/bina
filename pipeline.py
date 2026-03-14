@@ -142,11 +142,11 @@ def process_file(
     try:
         file_hash = _md5(path)
 
-        # Always register file in this workspace
-        store.add_file_to_workspace(workspace_id, file_hash)
-
-        # Deduplication: skip AI if this hash is already fully indexed globally
+        # Deduplication: skip AI if this hash is already fully indexed globally.
+        # add_file_to_workspace is safe here because the FileRecord already exists
+        # (workspace_files.file_hash is a FK → file_records.hash).
         if not force and store.file_already_indexed(file_hash):
+            store.add_file_to_workspace(workspace_id, file_hash)
             existing = store.get_file_by_hash(file_hash)
             _graph.mark_dirty(workspace_id)
             return {
@@ -190,7 +190,8 @@ def process_file(
         embed_text = f"{summary}\n{' '.join(keywords)}\n{sampled_text[:6000]}"
         embedding = _call_embed(embed_text)
 
-        # Persist to SQLite — hash is the primary key
+        # Persist to SQLite FIRST — FileRecord must exist before we can create
+        # the workspace_files FK row (add_file_to_workspace below).
         store.upsert_file(
             hash=file_hash,
             path=str(path),
@@ -202,6 +203,9 @@ def process_file(
             error=llm_error,
             processed_at=datetime.now(timezone.utc),
         )
+
+        # Register in workspace AFTER FileRecord exists (FK constraint satisfied)
+        store.add_file_to_workspace(workspace_id, file_hash)
 
         # Persist to ChromaDB — ID is the hash
         vector_store.upsert(

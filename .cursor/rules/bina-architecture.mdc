@@ -17,13 +17,18 @@ alwaysApply: true
 ```
 pipeline.process_file(path, workspace_id)
   → MD5 hash
-  → store.add_file_to_workspace()      # workspace_files row
-  → store.file_already_indexed(hash)?  # skip AI if true (dedup)
-  → extract + LLM + embed
-  → store.upsert_file()                # FileRecord status='done'
-  → vector_store.upsert(hash, …)
-  → graph.mark_dirty(workspace_id)
+  → store.file_already_indexed(hash)?
+      YES → store.add_file_to_workspace()   # FK exists, safe → return 'skipped'
+      NO  → extract + LLM + embed
+            → store.upsert_file()           # FileRecord created FIRST
+            → store.add_file_to_workspace() # FK now satisfied
+            → vector_store.upsert(hash, …)
+            → graph.mark_dirty(workspace_id)
 ```
+
+**Critical ordering:** `add_file_to_workspace` must come AFTER `upsert_file` for new
+files because `workspace_files.file_hash` is a FK → `file_records.hash`. Calling it
+before `upsert_file` raises a constraint violation and silently fails the whole file.
 
 ## Deletion
 

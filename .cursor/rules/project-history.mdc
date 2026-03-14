@@ -1,0 +1,158 @@
+---
+description: Full Bina project history — what was built, every bug fixed, current state of every file
+alwaysApply: true
+---
+
+# Bina — Full Project Context
+
+## What it is
+
+Bina is a **100% local** AI semantic file manager for macOS. Point it at a folder,
+it indexes every `.pdf/.docx/.txt/.md` using a local LLM (llama3.2:3b via Ollama)
+to extract summary/keywords/entities/doc_type, embeds each file with nomic-embed-text
+(768-dim), stores vectors in ChromaDB, and builds a NetworkX knowledge graph where
+edges = cosine similarity ≥ 0.72. You search in plain English; the query is embedded,
+matched against vectors, expanded through the graph, and shown as an Obsidian-style
+interactive graph. **Nothing leaves the machine.**
+
+---
+
+## Tech Stack
+
+| Layer | Tech |
+|---|---|
+| Desktop shell | Electron (CommonJS — NOT `"type":"module"`) |
+| Frontend | React 18 + TypeScript + Vite + Tailwind |
+| State management | Zustand (`src/store/appStore.ts`) |
+| Graph rendering | D3 v7 force simulation + HTML Canvas (manual pan/zoom, no d3-zoom) |
+| Backend | FastAPI sidecar on port 8765, spawned by Electron |
+| AI | Ollama: `llama3.2:3b` (LLM) + `nomic-embed-text` (embed) |
+| Vector store | ChromaDB at `~/.bina/chroma/` |
+| Relational DB | SQLite at `~/.bina/bina.db` via SQLAlchemy |
+| Graph | NetworkX in-memory, per-workspace, Louvain community detection |
+| File watching | watchdog FSEvents |
+| IPC | Electron contextBridge (`window.bina.api.*`) |
+
+---
+
+## File Map (every file and its role)
+
+### Root Python
+| File | Purpose |
+|---|---|
+| `config.py` | All constants: paths, model names, SIMILARITY_THRESHOLD=0.72, LLM_CHAR_BUDGET=4000 |
+| `store.py` | SQLAlchemy models + CRUD: `FileRecord`, `Workspace`, `WorkspaceFolder`, `WorkspaceFile` |
+| `vector_store.py` | ChromaDB wrapper: upsert/delete/query by **hash** (not path) |
+| `pipeline.py` | Core AI: hash→dedup→extract→LLM→embed→upsert_file→add_workspace |
+| `graph.py` | Per-workspace NetworkX graphs, Louvain communities, forced edges for isolated nodes |
+| `search.py` | Embed query → ChromaDB → expand via graph → return scored nodes |
+| `watcher.py` | watchdog FSEvents watcher, workspace-aware, calls pipeline_fn/remove_fn |
+| `main.py` | Click CLI: index, search, status, reindex, reset |
+| `extractor.py` | Text extraction: PyMuPDF (PDF), python-docx (DOCX), plain text |
+| `sampler.py` | Smart text sampling up to CHAR_BUDGET=24000 chars |
+
+### Backend
+| File | Purpose |
+|---|---|
+| `backend/api.py` | FastAPI sidecar — all REST endpoints, watcher management, lifespan |
+| `backend/reset.py` | Wipes `~/.bina/` entirely for a clean start |
+
+### Frontend
+| File | Purpose |
+|---|---|
+| `frontend/electron/main.js` | Electron main: spawns Python, BrowserWindow, IPC handlers (api:get/post/patch/delete, dialog:confirm) |
+| `frontend/electron/preload.js` | contextBridge: exposes `window.bina` with api.get/post/patch/delete/confirm/pickFolder |
+| `frontend/src/App.tsx` | Root: calls `apiGet('/global/status')` via IPC bridge, routes to Onboarding or MainLayout |
+| `frontend/src/api.ts` | HTTP client — IPC bridge in Electron, direct fetch in dev browser |
+| `frontend/src/types.ts` | All TS interfaces: GraphNode (id=MD5 hash, community_id), GraphEdge (forced?), Workspace, etc. |
+| `frontend/src/store/appStore.ts` | Zustand: activeWorkspaceId, workspaces[], loadWorkspaces(), persists to localStorage |
+| `frontend/src/components/App.tsx` | Root routing |
+| `frontend/src/components/Onboarding.tsx` | 5-step flow: Welcome→Privacy→Model→Folder→Workspace name/emoji/colour |
+| `frontend/src/components/MainLayout.tsx` | Main layout: loads workspaces, polls progress/status, passes onNodeDeleted=loadFullGraph |
+| `frontend/src/components/GraphCanvas.tsx` | Pure D3 v7 canvas: manual pan/zoom, pointer events, 4px drag threshold, community colours |
+| `frontend/src/components/Inspector.tsx` | Selected node detail panel (closes automatically when node is deleted) |
+| `frontend/src/components/Sidebar.tsx` | Workspace folders, add/remove folder, stats |
+| `frontend/src/components/SearchBar.tsx` | Debounced search, ⌘K shortcut |
+| `frontend/src/components/WorkspaceSwitcher.tsx` | Vertical panel: emoji circles, file count badges, switch workspace |
+| `frontend/src/components/WorkspaceModal.tsx` | Create/edit/delete workspace: emoji picker, name, colour swatches |
+
+---
+
+## Phase History
+
+### Phase 0 — Python CLI
+Validated the full AI pipeline (Ollama + ChromaDB + watchdog) before any UI.
+37 files indexed from a real university folder, 155 graph edges.
+
+### Phase 1 — Electron Desktop App
+Wrapped backend in FastAPI sidecar. Built the full React UI with Onboarding,
+MainLayout, GraphCanvas (using react-force-graph-2d at this stage), Inspector,
+Sidebar. Implemented Electron IPC bridge.
+
+### Phase 2 — Graph UI Overhaul
+- Fixed node pile-up: proper d3 force config (charge, link distance, center, collide)
+- Fixed graph flickering: separated graph topology from search score overlay;
+  topology only updates when node IDs actually change
+- Labels only on hover/selected/top-3 search results
+- Obsidian dark aesthetic: `#0c0c0f` bg, sqrt(degree) sizing, glow halos, dimming
+
+### Phase 3 — Multi-Workspace v2 (complete rewrite)
+- **Hash-based file IDs**: `FileRecord.hash` (MD5) is the PK, not path
+- **4 SQLite tables**: file_records, workspaces, workspace_folders, workspace_files
+- **Deduplication**: same file hash in two workspaces → one FileRecord, two workspace_files rows
+- **Per-workspace NetworkX graphs**: `_graphs: dict[workspace_id, nx.Graph]`
+- **Louvain community detection**: `community.best_partition(G, weight='weight')`
+- **Forced edges**: isolated nodes (degree 0) get one edge to nearest neighbour, `forced=True`
+- **D3 v7 canvas rewrite**: replaced react-force-graph-2d with pure D3 + Canvas
+  - Manual pan/zoom (no d3-zoom — eliminated click event conflicts)
+  - Pointer events + 4px drag threshold
+  - Community-based colours (8-color palette)
+  - Labels only for hover or degree > 3
+  - Depth slider (1–3) for local graph focus
+- **Startup resume**: `_resume_unfinished()` re-indexes files interrupted by crash
+- **Workspace UI**: WorkspaceSwitcher, WorkspaceModal, Onboarding workspace step
+
+---
+
+## All Bugs Fixed (chronological)
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | Ollama sudo install failure | Symlinked binary to `~/.local/bin/ollama` |
+| 2 | LLM returning malformed JSON | `_repair_json()`: strip fences, fix commas, Python→JSON literals |
+| 3 | LLM hanging on long docs | `LLM_CHAR_BUDGET=4000`, removed `format="json"`, dynamic `num_ctx` |
+| 4 | Embed model hanging | Cap embed input to 6000 chars |
+| 5 | High RAM after indexing | `unload_models()` called after index complete (`keep_alive=0`) |
+| 6 | Electron `require is not defined` | Don't use `"type":"module"` in package.json; keep CommonJS |
+| 7 | Nodes piling in center | Strong d3 charge (`-120`), link distance, collide force |
+| 8 | Graph flickering every 1.5s | Separate topology from search scores; in-place patching |
+| 9 | All labels overlapping | Labels only for hover/selected/top-3 |
+| 10 | Scanned PDFs failing silently | Known deferred issue — needs OCR |
+| 11 | Inspector card not closing on delete | `loadFullGraph` checks if `selectedNode` still in new graph |
+| 12 | Single click not opening card | D3 zoom conflict: replaced with manual pointer events + 4px drag threshold |
+| 13 | Deletion node still visible after 5s | `onNodeDeleted` prop calls `loadFullGraph` immediately after `api.deleteFile` |
+| 14 | CSP blocked `127.0.0.1` in App.tsx | Use `apiGet()` IPC bridge instead of raw `fetch()` |
+| 15 | New files ignored in shared-folder workspace | `add_file_to_workspace` called before `upsert_file` → FK violation; moved to after |
+| 16 | Restart mid-indexing lost progress | `_resume_unfinished()` on startup scans for unindexed files |
+
+---
+
+## How to Run
+
+```bash
+# Development (Electron + Vite + Python sidecar all in one)
+cd frontend
+npm run dev
+# Electron spawns Python sidecar automatically from .venv
+
+# Reset all indexed data
+source .venv/bin/activate
+python main.py reset
+```
+
+---
+
+## Past Transcripts (for deep context)
+
+Full conversation history: agent transcript `5d348bb0-0efc-44e5-9451-2b7fc45ad992`
+covers the entire v2 workspace rewrite and all UI work in detail.
