@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #0d0d0f;
+  color: #f0f0f2;
+  user-select: none;
+}
+
+/* Allow text selection in inspector / summary areas */
+.selectable { user-select: text; }
+
+/* macOS traffic-light drag region */
+.drag-region { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3a3a40; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #5a5a62; }
+
+/* Graph canvas */
+canvas { display: block; }
+
+/* Smooth transitions for panels */
+.panel-transition {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Shared button style */
+.btn-primary {
+  @apply inline-flex items-center justify-center gap-1.5 bg-bina-accent hover:bg-bina-accent/80 active:scale-95 text-white text-sm font-medium px-6 py-3 rounded-2xl transition-all duration-150 cursor-pointer;
+}
