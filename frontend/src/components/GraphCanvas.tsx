@@ -1,5 +1,6 @@
 import { useRef, useCallback, useEffect, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
+import * as d3 from 'd3-force-3d'
 import type { GraphNode, GraphEdge } from '../types'
 
 // ── Colour palette – one per doc_type ─────────────────────────────────────────
@@ -193,9 +194,9 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
     if (!fgRef.current || graphData.nodes.length === 0) return
     const fg = fgRef.current
 
-    // Repulsion: negative = push apart. -300 for ~30 nodes gives good spacing.
+    // Repulsion: stronger formula handles denser graphs (avg degree 6 now)
     const nodeCount = graphData.nodes.length
-    const chargeStr = Math.max(-600, -150 - nodeCount * 8)
+    const chargeStr = Math.max(-800, -200 - nodeCount * 10)
     fg.d3Force('charge')?.strength(chargeStr)
 
     // Link distance: how far connected nodes sit from each other
@@ -203,6 +204,15 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
 
     // Weak center pull so the graph doesn't drift off canvas
     fg.d3Force('center')?.strength(0.08)
+
+    // Collision force: prevents nodes from visually overlapping.
+    // Radius matches the drawn node size (baseR + padding).
+    fg.d3Force('collide', d3.forceCollide().radius((node: any) => {
+      const degree = graphData.links.filter(
+        (l: any) => l.source === node.id || l.target === node.id
+      ).length
+      return 6 + Math.sqrt(degree) * 1.5 + 4  // node visual radius + padding
+    }).strength(0.8))
 
     // Restart simulation from warm state
     fg.d3ReheatSimulation()
