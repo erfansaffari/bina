@@ -187,10 +187,30 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
     degreeMapRef.current = deg
   }, [edges])
 
+  // ── Apply d3 forces whenever topology changes ─────────────────────────────
+  // This is what spreads nodes out; without this they pile up in the center.
+  useEffect(() => {
+    if (!fgRef.current || graphData.nodes.length === 0) return
+    const fg = fgRef.current
+
+    // Repulsion: negative = push apart. -300 for ~30 nodes gives good spacing.
+    const nodeCount = graphData.nodes.length
+    const chargeStr = Math.max(-600, -150 - nodeCount * 8)
+    fg.d3Force('charge')?.strength(chargeStr)
+
+    // Link distance: how far connected nodes sit from each other
+    fg.d3Force('link')?.distance(60).strength(0.4)
+
+    // Weak center pull so the graph doesn't drift off canvas
+    fg.d3Force('center')?.strength(0.08)
+
+    // Restart simulation from warm state
+    fg.d3ReheatSimulation()
+  }, [graphData])
+
   // ── Camera: centre on best search result ──────────────────────────────────
   useEffect(() => {
     if (!fgRef.current || !searchScores || searchScores.size === 0) return
-    // Wait a tick for d3 positions to settle
     setTimeout(() => {
       if (!fgRef.current) return
       let bestId = '', bestScore = -1
@@ -198,106 +218,111 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
       const topNode = stableDataRef.current.nodes.find((n: any) => n.id === bestId)
       if (topNode?.x != null && topNode?.y != null) {
         fgRef.current.centerAt(topNode.x, topNode.y, 700)
-        fgRef.current.zoom(3, 700)
+        fgRef.current.zoom(2.5, 700)
       }
-    }, 600)
+    }, 800)
   }, [searchScores])
 
   // ── Draw: nodes ────────────────────────────────────────────────────────────
   const drawNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const gNode = node as GraphNode
-    const color = nodeColor(gNode)
+    const color      = nodeColor(gNode)
     const isSelected = gNode.id === selectedNodeId
     const isHovered  = gNode.id === hoveredNodeIdRef.current
     const hasQuery   = searchScores !== null
     const score      = searchScores?.get(gNode.id) ?? 0
     const isMatch    = hasQuery && score > 0
-    const isTop      = hasQuery && score >= 0.65
-    const inNeighbour = hoveredNodeIdRef.current && connectedNodeIdsRef.current.has(gNode.id)
+    const isTop      = hasQuery && score >= 0.6
+    const inNeighbour = hoveredNodeIdRef.current
+      ? connectedNodeIdsRef.current.has(gNode.id)
+      : false
 
-    // Dimming logic
+    // ── Alpha / dimming ───────────────────────────────────────────────────
     let alpha = 1
-    if (hasQuery && !isMatch && !isSelected) alpha = 0.12
-    else if (hoveredNodeIdRef.current && !inNeighbour && !isSelected) alpha = 0.25
+    if (hasQuery && !isMatch && !isSelected)       alpha = 0.10
+    else if (hoveredNodeIdRef.current && !inNeighbour && !isSelected) alpha = 0.20
 
-    // Node radius: base = degree-scaled, boosted by search score
+    // ── Node radius (keep small – Obsidian dots, not planets) ────────────
     const degree  = degreeMapRef.current.get(gNode.id) ?? 0
-    const degSize = Math.min(4 + Math.sqrt(degree) * 1.2, 10)
-    let r = isTop ? degSize + 5 : isMatch ? degSize + 2 : degSize
-    if (isSelected) r += 3
-    if (isHovered)  r = Math.max(r, degSize + 2)
+    // sqrt scaling so highly-connected nodes are only slightly larger
+    const baseR   = 3 + Math.sqrt(degree) * 0.5        // 3–8 px range
+    let r = baseR
+    if (isTop)     r = baseR + 3
+    if (isMatch && !isTop) r = baseR + 1.5
+    if (isSelected) r = baseR + 4
+    if (isHovered && !isSelected) r = baseR + 2
 
     ctx.save()
     ctx.globalAlpha = alpha
 
-    // Outer glow (selected / top match / hovered)
-    if (isSelected || isTop || isHovered) {
-      const glowR = r + (isSelected ? 12 : 8)
-      const grad = ctx.createRadialGradient(node.x, node.y, r * 0.5, node.x, node.y, glowR)
-      grad.addColorStop(0, hexAlpha(color, isSelected ? 0.55 : 0.35))
-      grad.addColorStop(1, hexAlpha(color, 0))
+    // ── Glow halo (only selected / hovered / top-match) ──────────────────
+    if (isSelected || isHovered || isTop) {
+      const haloR = r + (isSelected ? 10 : 6)
+      const g = ctx.createRadialGradient(node.x, node.y, r * 0.4, node.x, node.y, haloR)
+      g.addColorStop(0, hexAlpha(color, isSelected ? 0.5 : 0.28))
+      g.addColorStop(1, hexAlpha(color, 0))
       ctx.beginPath()
-      ctx.arc(node.x, node.y, glowR, 0, Math.PI * 2)
-      ctx.fillStyle = grad
+      ctx.arc(node.x, node.y, haloR, 0, Math.PI * 2)
+      ctx.fillStyle = g
       ctx.fill()
     }
 
-    // Inner fill
+    // ── Core dot ─────────────────────────────────────────────────────────
     ctx.beginPath()
     ctx.arc(node.x, node.y, r, 0, Math.PI * 2)
     if (isSelected) {
-      // White core with colour ring
       ctx.fillStyle = '#ffffff'
       ctx.fill()
       ctx.strokeStyle = color
-      ctx.lineWidth   = 2
+      ctx.lineWidth = 2
       ctx.stroke()
     } else {
       ctx.fillStyle = color
       ctx.fill()
     }
 
-    // Ring for top result
+    // Outer ring for top search result
     if (isTop && !isSelected) {
       ctx.beginPath()
       ctx.arc(node.x, node.y, r + 2.5, 0, Math.PI * 2)
-      ctx.strokeStyle = hexAlpha(color, 0.7)
-      ctx.lineWidth   = 1.5
+      ctx.strokeStyle = hexAlpha(color, 0.65)
+      ctx.lineWidth = 1.5
       ctx.stroke()
     }
 
-    // Label rendering
+    // ── Label — ONLY for hovered or selected node ─────────────────────────
+    // Also show for top-3 search matches when zoomed in
+    const topIds = hasQuery
+      ? Array.from(searchScores!.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0])
+      : []
+    const isTopThree = topIds.includes(gNode.id)
+
     const showLabel =
       isSelected ||
       isHovered  ||
-      (isTop && globalScale > 0.8) ||
-      (isMatch && globalScale > 1.4) ||
-      (!hasQuery && globalScale > 2)
+      (isTopThree && globalScale >= 0.6)
 
     if (showLabel) {
-      const rawLabel = gNode.label.replace(/\.[^.]+$/, '') // strip extension
-      const label    = rawLabel.length > 26 ? rawLabel.slice(0, 23) + '…' : rawLabel
-      const fontSize = Math.max(9, Math.min(13, 12 / Math.max(globalScale, 0.5)))
+      const rawLabel = gNode.label.replace(/\.[^.]+$/, '')
+      const label    = rawLabel.length > 28 ? rawLabel.slice(0, 25) + '…' : rawLabel
 
-      ctx.font      = `500 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`
-      ctx.textAlign = 'center'
+      // Font size stays readable at any zoom: fixed 12px in screen space
+      const fontSize = Math.max(10, Math.min(14, 12 / Math.max(globalScale * 0.6, 0.4)))
+      ctx.font         = `500 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`
+      ctx.textAlign    = 'center'
       ctx.textBaseline = 'top'
 
-      const labelY = node.y + r + 4 / Math.max(globalScale, 0.5)
-      const tw     = ctx.measureText(label).width
+      const labelY = node.y + r + 5 / Math.max(globalScale, 0.5)
+      const tw = ctx.measureText(label).width
+      const pad = 4, bh = fontSize + 4
 
-      // Pill background
-      const pad  = 3
-      const bx   = node.x - tw / 2 - pad
-      const by   = labelY - 1
-      const bw   = tw + pad * 2
-      const bh   = fontSize + 3
-      ctx.fillStyle = 'rgba(15,15,18,0.82)'
+      // Dark pill so text is always legible
+      ctx.fillStyle = 'rgba(10,10,14,0.88)'
       ctx.beginPath()
-      ctx.roundRect(bx, by, bw, bh, 3)
+      ctx.roundRect(node.x - tw / 2 - pad, labelY - 1, tw + pad * 2, bh, 4)
       ctx.fill()
 
-      ctx.fillStyle = isSelected ? '#ffffff' : (alpha < 0.5 ? hexAlpha(color, 0.6) : hexAlpha(color, 0.95))
+      ctx.fillStyle = isSelected ? '#ffffff' : hexAlpha(color, 0.95)
       ctx.fillText(label, node.x, labelY)
     }
 
@@ -373,19 +398,17 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
         onNodeClick={(node: any) => onNodeClick(node as GraphNode)}
         onNodeHover={handleNodeHover}
         nodeLabel=""
-        // Physics: settles quickly, doesn't restart on re-render
-        warmupTicks={40}
-        cooldownTicks={200}
-        cooldownTime={4000}
-        d3AlphaDecay={0.025}
-        d3VelocityDecay={0.35}
+        nodeRelSize={4}
+        cooldownTicks={300}
+        cooldownTime={6000}
+        d3AlphaDecay={0.02}
+        d3VelocityDecay={0.4}
         d3AlphaMin={0.001}
-        // d3 force config via ref (see useEffect below)
         linkDirectionalParticles={0}
         enableZoomInteraction
         enablePanInteraction
-        minZoom={0.15}
-        maxZoom={10}
+        minZoom={0.1}
+        maxZoom={12}
       />
 
       {/* Colour legend */}
