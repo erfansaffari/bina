@@ -48,6 +48,7 @@ export default function SearchBar({ onSearch, searchMs }: Props) {
       />
       <input
         ref={inputRef}
+        id="bina-search"
         type="text"
         value={value}
         onChange={(e) => setValue(e.target.value)}

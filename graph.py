@@ -15,12 +15,49 @@ The graph is kept in memory and rebuilt from scratch on each app launch
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import networkx as nx
 
 import store
 import vector_store
 from config import ENTITY_BOOST, MAX_GRAPH_NEIGHBOURS, SIMILARITY_THRESHOLD
+
+# ---------------------------------------------------------------------------
+# Module-level graph cache (single source of truth for all callers)
+# ---------------------------------------------------------------------------
+
+_G: nx.Graph | None = None
+_lock = threading.Lock()
+
+
+def get_graph() -> nx.Graph:
+    """Return the cached knowledge graph, rebuilding from stores if needed."""
+    global _G
+    with _lock:
+        if _G is None:
+            _G = build_graph()
+    return _G
+
+
+def mark_dirty() -> None:
+    """Invalidate the cache so the next get_graph() call rebuilds."""
+    global _G
+    with _lock:
+        _G = None
+
+
+def remove_node_from_graph(path: str) -> None:
+    """Surgically remove one node from the cached graph without a full rebuild.
+
+    If the graph has not been built yet (e.g. early startup) this is a no-op;
+    the node simply won't appear when the graph is first constructed.
+    """
+    global _G
+    with _lock:
+        if _G is not None and _G.has_node(path):
+            _G.remove_node(path)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

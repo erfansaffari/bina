@@ -71,6 +71,13 @@ def _status_table() -> Table:
 
     watched = _load_watched_folder()
 
+    G = build_graph()
+    nodes = G.number_of_nodes()
+    edges = G.number_of_edges()
+    degrees = [d for _, d in G.degree()]
+    avg_degree = f"{sum(degrees)/len(degrees):.1f}" if degrees else "0"
+    isolated = sum(1 for d in degrees if d == 0)
+
     table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     table.add_column("Key", style="bold cyan")
     table.add_column("Value", style="white")
@@ -79,6 +86,10 @@ def _status_table() -> Table:
     table.add_row("Files indexed", str(ok))
     table.add_row("Files failed", str(total - ok))
     table.add_row("Vectors in index", str(vectors))
+    table.add_row("Graph nodes", str(nodes))
+    table.add_row("Graph edges", str(edges))
+    table.add_row("Avg connections/node", avg_degree)
+    table.add_row("Isolated nodes", str(isolated))
     table.add_row("Data directory", str(BINA_HOME))
 
     return table

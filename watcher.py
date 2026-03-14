@@ -7,6 +7,7 @@ thread so the watcher loop is never blocked by AI processing.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -22,7 +23,12 @@ from watchdog.events import (
 from watchdog.observers import Observer
 
 from config import SUPPORTED_EXTENSIONS
+import graph
 import pipeline
+import store
+import vector_store
+
+logger = logging.getLogger(__name__)
 
 
 class _BinaHandler(FileSystemEventHandler):
@@ -65,8 +71,14 @@ class _BinaHandler(FileSystemEventHandler):
             self._process_async(event.src_path)
 
     def on_deleted(self, event: FileDeletedEvent) -> None:  # type: ignore[override]
-        if not event.is_directory and self._is_supported(event.src_path):
-            self._remove_async(event.src_path)
+        if event.is_directory:
+            return
+        # Resolve so the path matches what pipeline stored (str(Path(p).resolve()))
+        path = str(Path(event.src_path).resolve())
+        store.delete_file(path)
+        vector_store.delete(path)
+        graph.mark_dirty()   # force graph rebuild from updated stores on next request
+        logger.info("Removed deleted file: %s", path)
 
     def on_moved(self, event: FileMovedEvent) -> None:  # type: ignore[override]
         if not event.is_directory:

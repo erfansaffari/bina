@@ -22,9 +22,14 @@ interface Props {
 export default function Inspector({ node, open, onClose }: Props) {
   if (!open || !node) return null
 
-  const typeClass = TYPE_COLORS[node.doc_type] ?? TYPE_COLORS['Other']
+  const docType  = node.doc_type ?? 'Unknown'
+  const summary  = node.summary  ?? ''
+  const keywords = (node.keywords ?? []).map(kw => String(kw)).filter(Boolean)
   const entities = node.entities ?? {}
-  const hasEntities = Object.values(entities).some((arr: string[]) => arr.length > 0)
+  const path     = node.path     ?? node.id ?? ''
+
+  const typeClass    = TYPE_COLORS[docType] ?? TYPE_COLORS['Other']
+  const hasEntities  = Object.values(entities).some(arr => Array.isArray(arr) && arr.length > 0)
 
   return (
     <div
@@ -49,7 +54,7 @@ export default function Inspector({ node, open, onClose }: Props) {
         {/* Type badge + score */}
         <div className="flex items-center gap-2 flex-wrap">
           <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${typeClass}`}>
-            {node.doc_type}
+            {docType}
           </span>
           {node.score > 0 && (
             <span className="text-xs text-bina-muted">
@@ -64,23 +69,23 @@ export default function Inspector({ node, open, onClose }: Props) {
         </div>
 
         {/* Summary */}
-        {node.summary ? (
+        {summary ? (
           <div>
             <p className="text-xs font-medium text-bina-muted uppercase tracking-wider mb-2">Summary</p>
-            <p className="text-bina-text/80 text-sm leading-relaxed">{node.summary}</p>
+            <p className="text-bina-text/80 text-sm leading-relaxed">{summary}</p>
           </div>
         ) : (
           <p className="text-bina-muted text-sm italic">No summary available</p>
         )}
 
         {/* Keywords */}
-        {node.keywords && node.keywords.length > 0 && (
+        {keywords.length > 0 && (
           <div>
             <p className="text-xs font-medium text-bina-muted uppercase tracking-wider mb-2 flex items-center gap-1">
               <Tag className="w-3 h-3" /> Keywords
             </p>
             <div className="flex flex-wrap gap-1.5">
-              {node.keywords.map((kw) => (
+              {keywords.map((kw) => (
                 <span
                   key={kw}
                   className="text-xs bg-bina-border/60 text-bina-text/70 px-2.5 py-1 rounded-full"
@@ -124,7 +129,7 @@ export default function Inspector({ node, open, onClose }: Props) {
         {/* File path */}
         <div>
           <p className="text-xs font-medium text-bina-muted uppercase tracking-wider mb-2">Location</p>
-          <p className="text-bina-muted text-xs font-mono break-all leading-relaxed">{node.id}</p>
+          <p className="text-bina-muted text-xs font-mono break-all leading-relaxed">{path}</p>
         </div>
       </div>
 

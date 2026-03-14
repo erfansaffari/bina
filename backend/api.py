@@ -24,6 +24,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,11 +36,32 @@ import store
 import vector_store
 import pipeline as _pipeline
 from config import SUPPORTED_EXTENSIONS
-from graph import build_graph, subgraph_for_paths
+from graph import build_graph, subgraph_for_paths, get_graph, mark_dirty
 from search import search as _search
 from watcher import FolderWatcher
 
-app = FastAPI(title="Bina API", version="0.1.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Remove index records for files that no longer exist on disk.
+
+    Runs once at sidecar startup so stale entries from previously-watched
+    folders (or files deleted while the app was closed) are cleaned up
+    automatically — no manual intervention required.
+    """
+    removed = 0
+    for rec in store.get_all_files():
+        if not Path(rec.path).exists():
+            store.delete_file(rec.path)
+            vector_store.delete(rec.path)
+            removed += 1
+    if removed:
+        mark_dirty()
+        print(f"[startup] Purged {removed} orphaned record(s) for missing files.", flush=True)
+    yield  # app runs here
+
+
+app = FastAPI(title="Bina API", version="0.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,8 +86,6 @@ _progress: dict[str, Any] = {
 _progress_lock = threading.Lock()
 
 _watcher: FolderWatcher | None = None
-_graph_cache = None
-_graph_dirty = True
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +113,6 @@ def _node_from_record(rec, score: float = 0.0, from_graph: bool = False) -> dict
     }
 
 
-def _get_graph():
-    global _graph_cache, _graph_dirty
-    if _graph_dirty or _graph_cache is None:
-        _graph_cache = build_graph()
-        _graph_dirty = False
-    return _graph_cache
 
 
 def _graph_to_json(G) -> dict:
@@ -118,7 +132,6 @@ def _graph_to_json(G) -> dict:
 
 
 def _run_indexing(folder: Path) -> None:
-    global _graph_dirty
     files = _collect_files(folder)
 
     with _progress_lock:
@@ -138,7 +151,7 @@ def _run_indexing(folder: Path) -> None:
                 _progress["failed"] += 1
 
     _pipeline.unload_models()
-    _graph_dirty = True
+    mark_dirty()
 
     with _progress_lock:
         _progress.update(running=False, current=len(files), done=True)
@@ -175,7 +188,7 @@ def status():
         if p.is_dir():
             watched = str(p)
 
-    G = _get_graph()
+    G = get_graph()
     return {
         "indexed": store.get_ok_count(),
         "failed": store.get_file_count() - store.get_ok_count(),
@@ -216,7 +229,7 @@ def search(req: SearchRequest):
     import time
     t = time.time()
 
-    G = _get_graph()
+    G = get_graph()
     results = _search(req.query, G, n_results=req.n_results)
 
     # Build subgraph centred on search results
@@ -247,7 +260,7 @@ def search(req: SearchRequest):
 
 @app.get("/graph")
 def full_graph():
-    G = _get_graph()
+    G = get_graph()
     return _graph_to_json(G)
 
 
@@ -262,8 +275,7 @@ def start_watch(req: WatchRequest):
         _watcher.stop()
 
     def _on_file(result: dict):
-        global _graph_dirty
-        _graph_dirty = True
+        mark_dirty()
 
     _watcher = FolderWatcher(folder, on_processed=_on_file)
     _watcher.start()
@@ -281,10 +293,11 @@ def stop_watch():
 
 @app.delete("/file")
 def delete_file(req: DeleteFileRequest):
-    global _graph_dirty
-    _pipeline.remove_file(req.path)
-    _graph_dirty = True
-    return {"status": "deleted", "path": req.path}
+    path = str(Path(req.path).resolve())
+    removed = store.delete_file(path)
+    vector_store.delete(path)
+    mark_dirty()   # force graph rebuild from updated stores on next request
+    return {"removed": removed, "path": path}
 
 
 @app.get("/files")

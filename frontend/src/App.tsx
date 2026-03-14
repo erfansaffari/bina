@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import Onboarding from './components/Onboarding'
 import MainLayout from './components/MainLayout'
@@ -7,13 +7,19 @@ import type { AppScreen, StatusData } from './types'
 export default function App() {
   const [screen, setScreen] = useState<AppScreen | null>(null)
   const [status, setStatus] = useState<StatusData | null>(null)
+  const watcherStarted = useRef(false)
 
   useEffect(() => {
     api.status()
       .then((s) => {
         setStatus(s)
-        // Skip onboarding if a folder is already watched
         if (s.watched_folder) {
+          // Restart the FSEvents watcher every time the app launches so that
+          // Finder deletions/additions are picked up even after a relaunch.
+          if (!watcherStarted.current) {
+            watcherStarted.current = true
+            api.watch(s.watched_folder).catch(() => {})
+          }
           setScreen('main')
         } else {
           setScreen('onboarding')

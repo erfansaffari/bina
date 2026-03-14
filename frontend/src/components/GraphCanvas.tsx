@@ -2,6 +2,7 @@ import { useRef, useCallback, useEffect, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import * as d3 from 'd3-force-3d'
 import type { GraphNode, GraphEdge } from '../types'
+import { openFile } from '../api'
 
 // ── Colour palette – one per doc_type ─────────────────────────────────────────
 export const TYPE_COLORS: Record<string, string> = {
@@ -82,6 +83,13 @@ function Legend({ presentTypes }: { presentTypes: string[] }) {
 export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores, onNodeClick }: Props) {
   const fgRef = useRef<any>(null)
 
+  // ── Double-click detection ────────────────────────────────────────────────
+  // react-force-graph-2d's onNodeDoubleClick is unreliable because onNodeClick
+  // fires first on each click and zooms the camera, shifting the node before
+  // the second click arrives. We detect the double-click manually instead.
+  const clickTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastClickNodeId = useRef<string | null>(null)
+
   // ── Stable graph data – only recreated when topology changes ────────────────
   // This is the KEY fix: we never pass a new graphData object unless
   // the set of node IDs or edges actually changes.
@@ -91,16 +99,27 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
   const prevEdgeCountRef = useRef(0)
 
   useEffect(() => {
-    const newIds = new Set(nodes.map(n => n.id))
+    // Resolve all edge endpoint IDs up front so we can filter isolated nodes.
+    const resolvedLinks = edges.map(e => ({
+      source: typeof e.source === 'string' ? e.source : (e.source as GraphNode).id,
+      target: typeof e.target === 'string' ? e.target : (e.target as GraphNode).id,
+      weight: e.weight,
+    }))
+
+    // Isolated nodes (zero edges) pile at the canvas origin in d3-force.
+    // Keep them in state for the Inspector but never hand them to ForceGraph.
+    const connectedIds = new Set(resolvedLinks.flatMap(l => [l.source, l.target]))
+    const visibleNodes = nodes.filter(n => connectedIds.has(n.id))
+
     const topologyChanged =
-      nodes.length !== prevNodeIdsRef.current.size ||
-      nodes.some(n => !prevNodeIdsRef.current.has(n.id)) ||
+      visibleNodes.length !== prevNodeIdsRef.current.size ||
+      visibleNodes.some(n => !prevNodeIdsRef.current.has(n.id)) ||
       edges.length !== prevEdgeCountRef.current
 
     if (!topologyChanged) {
       // Just patch mutable properties in-place – simulation keeps running
       stableDataRef.current.nodes.forEach((n: any) => {
-        const updated = nodes.find(u => u.id === n.id)
+        const updated = visibleNodes.find(u => u.id === n.id)
         if (updated) {
           n.doc_type = updated.doc_type
           n.status   = updated.status
@@ -120,18 +139,14 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
     })
 
     const newData = {
-      nodes: nodes.map(n => {
+      nodes: visibleNodes.map(n => {
         const p = posCache.get(n.id)
         return { ...n, x: p?.x, y: p?.y, vx: 0, vy: 0 }
       }),
-      links: edges.map(e => ({
-        source: typeof e.source === 'string' ? e.source : (e.source as GraphNode).id,
-        target: typeof e.target === 'string' ? e.target : (e.target as GraphNode).id,
-        weight: e.weight,
-      })),
+      links: resolvedLinks,
     }
 
-    prevNodeIdsRef.current  = newIds
+    prevNodeIdsRef.current  = new Set(visibleNodes.map(n => n.id))
     prevEdgeCountRef.current = edges.length
     stableDataRef.current   = newData
     setGraphData(newData)
@@ -190,33 +205,41 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
 
   // ── Apply d3 forces whenever topology changes ─────────────────────────────
   // This is what spreads nodes out; without this they pile up in the center.
+  // We depend on nodes.length (primitive) so React doesn't re-fire on every
+  // object-reference change, and we defer 100 ms so ForceGraph's canvas has
+  // time to mount before we configure forces on it.
   useEffect(() => {
-    if (!fgRef.current || graphData.nodes.length === 0) return
-    const fg = fgRef.current
+    if (graphData.nodes.length === 0) return
+    const snapshot = graphData  // capture for the closure
+    const t = setTimeout(() => {
+      const fg = fgRef.current
+      if (!fg) return
 
-    // Repulsion: stronger formula handles denser graphs (avg degree 6 now)
-    const nodeCount = graphData.nodes.length
-    const chargeStr = Math.max(-800, -200 - nodeCount * 10)
-    fg.d3Force('charge')?.strength(chargeStr)
+      // Repulsion: stronger formula handles denser graphs (avg degree 6 now)
+      const nodeCount = snapshot.nodes.length
+      const chargeStr = Math.max(-800, -200 - nodeCount * 10)
+      fg.d3Force('charge')?.strength(chargeStr)
 
-    // Link distance: how far connected nodes sit from each other
-    fg.d3Force('link')?.distance(60).strength(0.4)
+      // Link distance: how far connected nodes sit from each other
+      fg.d3Force('link')?.distance(60).strength(0.4)
 
-    // Weak center pull so the graph doesn't drift off canvas
-    fg.d3Force('center')?.strength(0.08)
+      // Weak center pull so the graph doesn't drift off canvas
+      fg.d3Force('center')?.strength(0.08)
 
-    // Collision force: prevents nodes from visually overlapping.
-    // Radius matches the drawn node size (baseR + padding).
-    fg.d3Force('collide', d3.forceCollide().radius((node: any) => {
-      const degree = graphData.links.filter(
-        (l: any) => l.source === node.id || l.target === node.id
-      ).length
-      return 6 + Math.sqrt(degree) * 1.5 + 4  // node visual radius + padding
-    }).strength(0.8))
+      // Collision force: prevents nodes from visually overlapping.
+      // Radius matches the drawn node size (baseR + padding).
+      fg.d3Force('collide', d3.forceCollide().radius((node: any) => {
+        const degree = snapshot.links.filter(
+          (l: any) => l.source === node.id || l.target === node.id
+        ).length
+        return 6 + Math.sqrt(degree) * 1.5 + 4  // node visual radius + padding
+      }).strength(0.8))
 
-    // Restart simulation from warm state
-    fg.d3ReheatSimulation()
-  }, [graphData])
+      // Restart simulation from warm state
+      fg.d3ReheatSimulation()
+    }, 100)
+    return () => clearTimeout(t)
+  }, [graphData.nodes.length])
 
   // ── Camera: centre on best search result ──────────────────────────────────
   useEffect(() => {
@@ -249,7 +272,7 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
 
     // ── Alpha / dimming ───────────────────────────────────────────────────
     let alpha = 1
-    if (hasQuery && !isMatch && !isSelected)       alpha = 0.10
+    if (hasQuery && !isMatch && !isSelected)       alpha = 0.15
     else if (hoveredNodeIdRef.current && !inNeighbour && !isSelected) alpha = 0.20
 
     // ── Node radius (keep small – Obsidian dots, not planets) ────────────
@@ -405,7 +428,28 @@ export default function GraphCanvas({ nodes, edges, selectedNodeId, searchScores
         nodeCanvasObjectMode={() => 'replace'}
         linkCanvasObject={drawLink}
         linkCanvasObjectMode={() => 'replace'}
-        onNodeClick={(node: any) => onNodeClick(node as GraphNode)}
+        onNodeClick={(node: any) => {
+          const id = (node as GraphNode).id
+
+          if (lastClickNodeId.current === id && clickTimerRef.current !== null) {
+            // ── Second click within 300 ms on the same node → double-click ──
+            clearTimeout(clickTimerRef.current)
+            clickTimerRef.current = null
+            lastClickNodeId.current = null
+            if (id) openFile(id)
+            return
+          }
+
+          // ── First click: start timer; act as single-click if no second arrives ──
+          lastClickNodeId.current = id
+          clickTimerRef.current = setTimeout(() => {
+            clickTimerRef.current = null
+            lastClickNodeId.current = null
+            onNodeClick(node as GraphNode)
+            fgRef.current?.centerAt(node.x, node.y, 600)
+            fgRef.current?.zoom(2.5, 600)
+          }, 300)
+        }}
         onNodeHover={handleNodeHover}
         nodeLabel=""
         nodeRelSize={4}

@@ -27,6 +27,8 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
 
   // Track whether a graph load is in flight to avoid double-loads
   const loadingGraph = useRef(false)
+  // Track last known node count so we can detect external changes (e.g. Finder deletions)
+  const prevGraphNodes = useRef<number | null>(null)
 
   const loadFullGraph = useCallback(async () => {
     if (loadingGraph.current) return
@@ -35,6 +37,14 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
       const g = await api.graph()
       setFullNodes(g.nodes)
       setFullEdges(g.edges)
+      // If the selected node was removed (file deleted), close the Inspector
+      setSelectedNode(prev => {
+        if (prev && !g.nodes.some(n => n.id === prev.id)) {
+          setInspectorOpen(false)
+          return null
+        }
+        return prev
+      })
     } catch {}
     loadingGraph.current = false
   }, [])
@@ -42,11 +52,24 @@ export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
   // Load full graph on mount
   useEffect(() => { loadFullGraph() }, [loadFullGraph])
 
-  // Poll status every 5 s
+  // Poll status every 5 s; reload graph if the node count changed externally
+  // (e.g. a file was deleted from Finder and the watcher removed it from stores)
   useEffect(() => {
-    const id = setInterval(() => { api.status().then(setStatus).catch(() => {}) }, 5000)
+    const id = setInterval(async () => {
+      try {
+        const s = await api.status()
+        setStatus(s)
+        if (
+          prevGraphNodes.current !== null &&
+          s.graph_nodes !== prevGraphNodes.current
+        ) {
+          await loadFullGraph()
+        }
+        prevGraphNodes.current = s.graph_nodes
+      } catch {}
+    }, 5000)
     return () => clearInterval(id)
-  }, [])
+  }, [loadFullGraph])
 
   // Poll progress while indexing; reload graph when done
   const lastDoneRef = useRef(false)

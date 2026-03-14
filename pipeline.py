@@ -21,6 +21,7 @@ import ollama
 
 import store
 import vector_store
+import graph as _graph
 from config import EMBED_MODEL, LLM_MODEL, LLM_CHAR_BUDGET
 from extractor import extract
 from sampler import sample
@@ -234,7 +235,8 @@ def process_file(path: str | Path, force: bool = False) -> dict[str, Any]:
 
 
 def remove_file(path: str | Path) -> None:
-    """Remove a deleted file from all stores."""
+    """Remove a deleted file from all three stores (SQLite, ChromaDB, graph)."""
     path = str(Path(path).resolve())
     store.delete_file(path)
     vector_store.delete(path)
+    _graph.mark_dirty()   # force graph rebuild from updated stores on next request

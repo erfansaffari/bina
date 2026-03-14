@@ -91,10 +91,12 @@ def upsert_file(
         return record
 
 
-def delete_file(path: str | Path) -> None:
+def delete_file(path: str | Path) -> bool:
+    """Delete the record for *path*. Returns True if a row was removed."""
     with get_session() as session:
-        session.query(FileRecord).filter_by(path=str(path)).delete()
+        deleted = session.query(FileRecord).filter_by(path=str(path)).delete()
         session.commit()
+        return deleted > 0
 
 
 def get_all_files() -> list[FileRecord]:
