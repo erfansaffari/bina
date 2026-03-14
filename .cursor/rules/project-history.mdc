@@ -96,7 +96,16 @@ Sidebar. Implemented Electron IPC bridge.
 - Labels only on hover/selected/top-3 search results
 - Obsidian dark aesthetic: `#0c0c0f` bg, sqrt(degree) sizing, glow halos, dimming
 
-### Phase 3 — Multi-Workspace v2 (complete rewrite)
+### Phase 3 — macOS Polish + Settings
+- **Inspector bug fixed**: `openFile`/`showInFinder` now use `node.path` (was wrongly using `node.id` = hash)
+- **Settings pane**: `SettingsModal.tsx` — model selector (3b/8b), similarity threshold (0.50–0.95), max neighbours (1–10), clear index
+- **Settings persistence**: `config.py` now has `load_settings()` + `save_settings()` writing to `~/.bina/settings.json`; hot-reloads into module vars
+- **Backend settings**: `GET /settings`, `POST /settings`, `DELETE /index/clear` endpoints in `api.py`
+- **Re-index button**: ↺ icon in Sidebar Folders header — triggers `/index` for all tracked folders
+- **Incremental graph deletion**: `remove_node_from_graph()` now surgically removes node + edges + re-runs Louvain in-place; no full rebuild on file deletion
+- **`vector_store.clear_all()`**: Deletes and recreates ChromaDB collection for clean index wipe
+
+---
 - **Hash-based file IDs**: `FileRecord.hash` (MD5) is the PK, not path
 - **4 SQLite tables**: file_records, workspaces, workspace_folders, workspace_files
 - **Deduplication**: same file hash in two workspaces → one FileRecord, two workspace_files rows
@@ -134,6 +143,7 @@ Sidebar. Implemented Electron IPC bridge.
 | 14 | CSP blocked `127.0.0.1` in App.tsx | Use `apiGet()` IPC bridge instead of raw `fetch()` |
 | 15 | New files ignored in shared-folder workspace | `add_file_to_workspace` called before `upsert_file` → FK violation; moved to after |
 | 16 | Restart mid-indexing lost progress | `_resume_unfinished()` on startup scans for unindexed files |
+| 17 | Inspector "Open File" / "Show in Finder" silently broken | Used `node.id` (hash) instead of `node.path` — fixed |
 
 ---
 

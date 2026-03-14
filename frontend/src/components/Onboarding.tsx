@@ -1,7 +1,8 @@
 import { useState, useRef } from 'react'
-import { Lock, Zap, Brain, Folder, ChevronRight, Shield, Eye, HardDrive } from 'lucide-react'
-import { api, workspacesApi, openFolder } from '../api'
+import { Lock, Folder, ChevronRight, Shield, Eye, HardDrive } from 'lucide-react'
+import { workspacesApi, openFolder } from '../api'
 import { useAppStore } from '../store/appStore'
+import ModelSetupScreen from './ModelSetupScreen'
 
 const EMOJIS = ['📁', '📚', '💼', '🔬', '🎨', '📝', '🧪', '📊', '🗂️', '🔒', '💡', '🌍', '🎯', '📐', '🏗️', '🧠', '📌', '🗃️', '🔖', '✏️']
 const COLOURS = ['#4F46E5', '#0D9488', '#D97706', '#DC2626', '#7C3AED', '#DB2777']
@@ -10,11 +11,10 @@ interface Props {
   onComplete: () => void
 }
 
-type Step = 'welcome' | 'privacy' | 'model' | 'folder' | 'workspace'
+type Step = 'welcome' | 'privacy' | 'models' | 'folder' | 'workspace'
 
 export default function Onboarding({ onComplete }: Props) {
   const [step, setStep] = useState<Step>('welcome')
-  const [model, setModel] = useState<'fast' | 'smart'>('fast')
   const [folder, setFolder] = useState<string | null>(null)
   const [wsName, setWsName] = useState('')
   const [wsEmoji, setWsEmoji] = useState('📁')
@@ -23,7 +23,7 @@ export default function Onboarding({ onComplete }: Props) {
   const { setActiveWorkspace, loadWorkspaces } = useAppStore()
   const nameRef = useRef<HTMLInputElement>(null)
 
-  const steps: Step[] = ['welcome', 'privacy', 'model', 'folder', 'workspace']
+  const steps: Step[] = ['welcome', 'privacy', 'models', 'folder', 'workspace']
 
   async function handlePickFolder() {
     const picked = await openFolder()
@@ -126,80 +126,16 @@ export default function Onboarding({ onComplete }: Props) {
                 </div>
               ))}
             </div>
-            <button onClick={() => setStep('model')} className="btn-primary">
+            <button onClick={() => setStep('models')} className="btn-primary">
               Continue <ChevronRight className="w-4 h-4 ml-1" />
             </button>
           </div>
         )}
 
-        {/* Model selection */}
-        {step === 'model' && (
-          <div className="flex flex-col items-center text-center max-w-lg animate-slide-up">
-            <h2 className="text-3xl font-display font-semibold text-bina-text mb-2">
-              Choose your mode
-            </h2>
-            <p className="text-bina-muted mb-8 text-sm">
-              Both modes understand your files. Smart is better for dense technical documents.
-            </p>
-            <div className="flex gap-4 w-full mb-10">
-              {[
-                {
-                  id: 'fast' as const,
-                  icon: Zap,
-                  label: 'Fast',
-                  badge: 'Recommended',
-                  model: 'llama3.2:3b',
-                  ram: '4 GB RAM',
-                  speed: '5–10s per file',
-                  color: 'text-bina-accent',
-                  glow: 'border-bina-accent',
-                },
-                {
-                  id: 'smart' as const,
-                  icon: Brain,
-                  label: 'Smart',
-                  badge: null,
-                  model: 'llama3.1:8b',
-                  ram: '8 GB RAM',
-                  speed: '10–20s per file',
-                  color: 'text-bina-purple',
-                  glow: 'border-bina-purple',
-                },
-              ].map((opt) => (
-                <button
-                  key={opt.id}
-                  onClick={() => setModel(opt.id)}
-                  className={`flex-1 p-5 rounded-2xl border text-left transition-all duration-200 ${
-                    model === opt.id
-                      ? `bg-bina-surface ${opt.glow} shadow-lg`
-                      : 'bg-bina-surface/50 border-bina-border hover:border-bina-muted'
-                  }`}
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <opt.icon className={`w-6 h-6 ${opt.color}`} />
-                    {opt.badge && (
-                      <span className="text-xs bg-bina-accent/20 text-bina-accent px-2 py-0.5 rounded-full">
-                        {opt.badge}
-                      </span>
-                    )}
-                  </div>
-                  <div className="font-semibold text-bina-text mb-1">{opt.label}</div>
-                  <div className="text-xs text-bina-muted font-mono mb-3">{opt.model}</div>
-                  <div className="space-y-1">
-                    <div className="text-xs text-bina-muted">{opt.ram}</div>
-                    <div className="text-xs text-bina-muted">{opt.speed}</div>
-                  </div>
-                  {model === opt.id && (
-                    <div className={`mt-3 h-0.5 rounded-full bg-gradient-to-r ${
-                      opt.id === 'fast' ? 'from-bina-accent to-transparent' : 'from-bina-purple to-transparent'
-                    }`} />
-                  )}
-                </button>
-              ))}
-            </div>
-            <button onClick={() => setStep('folder')} className="btn-primary">
-              Continue <ChevronRight className="w-4 h-4 ml-1" />
-            </button>
+        {/* Models setup step */}
+        {step === 'models' && (
+          <div className="w-full animate-slide-up">
+            <ModelSetupScreen onAllReady={() => setStep('folder')} />
           </div>
         )}
 

@@ -155,3 +155,20 @@ def get_all_embeddings() -> dict[str, list[float]]:
 
 def count() -> int:
     return _get_collection().count()
+
+
+def clear_all() -> None:
+    """Delete and recreate the ChromaDB collection, wiping all vectors."""
+    global _client, _collection
+    col = _get_collection()
+    # Delete the collection entirely
+    assert _client is not None
+    try:
+        _client.delete_collection(COLLECTION_NAME)
+    except Exception:
+        pass
+    # Recreate it fresh and reset the cached reference
+    _collection = _client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )

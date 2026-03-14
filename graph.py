@@ -65,12 +65,35 @@ def mark_all_dirty() -> None:
 
 
 def remove_node_from_graph(workspace_id: str, file_hash: str) -> None:
-    """Surgically remove one node without a full rebuild."""
+    """Surgically remove one node without a full rebuild.
+
+    Removes the node and all its edges in-place, then re-runs Louvain
+    community detection on the surviving graph so community_id values stay
+    accurate.  Does NOT mark the workspace dirty — callers that need a full
+    rebuild should call mark_dirty() explicitly.
+    """
     with _lock:
-        if workspace_id in _graphs:
-            G = _graphs[workspace_id]
-            if G.has_node(file_hash):
-                G.remove_node(file_hash)
+        if workspace_id not in _graphs:
+            return
+        G = _graphs[workspace_id]
+        if not G.has_node(file_hash):
+            return
+        G.remove_node(file_hash)  # also removes all incident edges
+
+        # Re-run community detection on the trimmed graph
+        if _LOUVAIN_AVAILABLE and G.number_of_edges() > 0:
+            try:
+                partition = community_louvain.best_partition(G, weight="weight")
+            except Exception:
+                partition = {n: 0 for n in G.nodes}
+        else:
+            partition = {}
+            for comp_id, component in enumerate(nx.connected_components(G)):
+                for node_hash in component:
+                    partition[node_hash] = comp_id
+
+        for n, cid in partition.items():
+            G.nodes[n]["community_id"] = cid
 
 
 # ---------------------------------------------------------------------------

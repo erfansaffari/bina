@@ -723,7 +723,175 @@ def start_index(req: IndexRequest, background_tasks: BackgroundTasks):
     return {"status": "started", "folder": str(folder), "workspace_id": workspace_id}
 
 
+# ---------------------------------------------------------------------------
+# Routes — settings
+# ---------------------------------------------------------------------------
+
+import config as _config
+
+
+class UpdateSettingsRequest(BaseModel):
+    llm_model: str | None = None
+    similarity_threshold: float | None = None
+    max_graph_neighbours: int | None = None
+
+
+@app.get("/settings")
+def get_settings():
+    return _config.load_settings()
+
+
+@app.post("/settings")
+def update_settings(req: UpdateSettingsRequest):
+    updated = _config.save_settings(
+        llm_model=req.llm_model,
+        similarity_threshold=req.similarity_threshold,
+        max_graph_neighbours=req.max_graph_neighbours,
+    )
+    # Invalidate all workspace graphs so next access picks up new threshold /
+    # neighbour count.
+    mark_all_dirty()
+    return updated
+
+
+@app.delete("/index/clear")
+def clear_index():
+    """Wipe all indexed data — SQLite file records + ChromaDB vectors."""
+    # Stop all watchers before wiping (they'd fail on missing db)
+    with _watchers_lock:
+        keys = list(_watchers.keys())
+    for k in keys:
+        try:
+            _watchers[k].stop()
+        except Exception:
+            pass
+    _watchers.clear()
+
+    # Clear the in-memory graph cache
+    import graph as _g
+    with _g._lock:
+        _g._graphs.clear()
+        _g._dirty.clear()
+
+    # Wipe ChromaDB collection (delete + recreate)
+    vector_store.clear_all()
+
+    # Wipe SQLite: drop all tables and recreate schema
+    import store as _store
+    from sqlalchemy import text as _text
+    with _store.get_session() as session:
+        session.execute(_text("DELETE FROM workspace_files"))
+        session.execute(_text("DELETE FROM workspace_folders"))
+        session.execute(_text("DELETE FROM file_records"))
+        session.execute(_text("DELETE FROM workspaces"))
+        session.commit()
+
+    # Reset progress state
+    with _progress_lock:
+        _progress.update(running=False, total=0, current=0,
+                         current_file="", done=True, ok=0, failed=0)
+
+    return {"cleared": True}
+
+
+# ---------------------------------------------------------------------------
+# Routes — model management
+# ---------------------------------------------------------------------------
+
+import threading as _threading
+
+# Required models: name → display info
+_REQUIRED_MODELS = [
+    {"name": "qwen3:4b",       "role": "Text understanding (LLM)",    "size_gb": 2.6},
+    {"name": "qwen2.5vl:3b",   "role": "Image understanding (Vision)", "size_gb": 3.2},
+    {"name": "nomic-embed-text","role": "Semantic embeddings",         "size_gb": 0.3},
+]
+
+# Pull progress store: model_name → {status, percent, total, completed, error}
+_pull_progress: dict[str, dict] = {}
+_pull_lock = _threading.Lock()
+
+
+@app.get("/models/status")
+def get_models_status():
+    """Check which required models are currently installed in Ollama."""
+    try:
+        result = ollama.list()
+        installed_names = set()
+        for m in result.get("models", []):
+            # Normalize: "qwen3:4b" and "qwen3" both count
+            n = m.get("name", "") or m.get("model", "")
+            installed_names.add(n)
+            # Also add the base name (strip tag)
+            installed_names.add(n.split(":")[0])
+    except Exception as e:
+        return {"error": str(e), "models": []}
+
+    models_out = []
+    for req in _REQUIRED_MODELS:
+        name = req["name"]
+        base = name.split(":")[0]
+        installed = name in installed_names or base in installed_names
+        models_out.append({
+            "name": name,
+            "role": req["role"],
+            "size_gb": req["size_gb"],
+            "installed": installed,
+        })
+
+    return {"models": models_out, "all_ready": all(m["installed"] for m in models_out)}
+
+
+def _do_pull(model_name: str) -> None:
+    """Background thread: stream pull progress from Ollama."""
+    with _pull_lock:
+        _pull_progress[model_name] = {"status": "pulling", "percent": 0, "error": None}
+    try:
+        for chunk in ollama.pull(model_name, stream=True):
+            total = chunk.get("total", 0)
+            completed = chunk.get("completed", 0)
+            status = chunk.get("status", "pulling")
+            percent = int(completed / total * 100) if total else 0
+            with _pull_lock:
+                _pull_progress[model_name] = {
+                    "status": status,
+                    "percent": percent,
+                    "total": total,
+                    "completed": completed,
+                    "error": None,
+                }
+        with _pull_lock:
+            _pull_progress[model_name]["status"] = "done"
+            _pull_progress[model_name]["percent"] = 100
+    except Exception as e:
+        with _pull_lock:
+            _pull_progress[model_name] = {"status": "error", "percent": 0, "error": str(e)}
+
+
+@app.post("/models/pull/{model_name:path}")
+def pull_model(model_name: str):
+    """Start pulling a model in the background. Poll /models/pull-progress/{name} for updates."""
+    with _pull_lock:
+        existing = _pull_progress.get(model_name, {})
+        if existing.get("status") in ("pulling", "downloading manifest"):
+            return {"started": False, "reason": "already pulling"}
+
+    t = _threading.Thread(target=_do_pull, args=(model_name,), daemon=True)
+    t.start()
+    return {"started": True, "model": model_name}
+
+
+@app.get("/models/pull-progress/{model_name:path}")
+def get_pull_progress(model_name: str):
+    """Get the current pull progress for a model being downloaded."""
+    with _pull_lock:
+        return _pull_progress.get(model_name, {"status": "idle", "percent": 0})
+
+
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     import uvicorn
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+

@@ -128,6 +128,52 @@ export const workspacesApi = {
 }
 
 // ---------------------------------------------------------------------------
+// Settings API
+// ---------------------------------------------------------------------------
+
+interface BinaSettings {
+  llm_model: string
+  similarity_threshold: number
+  max_graph_neighbours: number
+}
+
+export const settingsApi = {
+  get: () => apiGet<BinaSettings>('/settings'),
+
+  update: (s: Partial<BinaSettings>) =>
+    post<BinaSettings>('/settings', s),
+
+  clearIndex: () => del<{ cleared: boolean }>('/index/clear'),
+}
+
+
+// ---------------------------------------------------------------------------
+// Models API
+// ---------------------------------------------------------------------------
+
+export interface ModelStatus {
+  name: string
+  role: string
+  size_gb: number
+  installed: boolean
+}
+
+export const modelsApi = {
+  status: () =>
+    apiGet<{ models: ModelStatus[]; all_ready: boolean }>('/models/status'),
+
+  pull: (modelName: string) =>
+    post<{ started: boolean }>(`/models/pull/${encodeURIComponent(modelName)}`, {}),
+
+  pullProgress: (modelName: string) =>
+    apiGet<{ status: string; percent: number; error: string | null }>(
+      `/models/pull-progress/${encodeURIComponent(modelName)}`
+    ),
+}
+
+
+
+// ---------------------------------------------------------------------------
 // Electron native helpers
 // ---------------------------------------------------------------------------
 

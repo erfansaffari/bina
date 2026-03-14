@@ -10,11 +10,11 @@ import WorkspaceModal from './WorkspaceModal'
 import type { GraphNode, GraphEdge, StatusData, ProgressData, Workspace } from '../types'
 
 interface Props {
-  initialStatus: StatusData | null
-  onNeedOnboarding: () => void
+  initialStatus?: StatusData | null
+  onNeedOnboarding?: () => void
 }
 
-export default function MainLayout({ initialStatus, onNeedOnboarding }: Props) {
+export default function MainLayout({ initialStatus = null, onNeedOnboarding = () => {} }: Props) {
   const { activeWorkspaceId, loadWorkspaces, workspaces } = useAppStore()
 
   const [fullNodes, setFullNodes] = useState<GraphNode[]>([])

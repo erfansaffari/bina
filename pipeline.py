@@ -3,9 +3,10 @@ Local AI pipeline.
 
 process_file(path, workspace_id, force=False)
     1. MD5 hash → register in workspace; skip AI if already indexed globally
-    2. Extract text → smart sample
-    3. Ollama LLM → structured JSON (summary, keywords, entities, doc_type)
-    4. Ollama embed → 384-dim vector
+    2. Extract text (or image bytes for images) → smart sample
+    3a. [Images] qwen2.5vl:3b vision model → visual description text
+    3b. [Text] qwen3:4b LLM → structured JSON (summary, keywords, entities, doc_type)
+    4. nomic-embed-text → 768-dim vector
     5. Write to SQLite (store.py) + ChromaDB (vector_store.py)
     6. Return metadata dict
 
@@ -27,7 +28,7 @@ import ollama
 import store
 import vector_store
 import graph as _graph
-from config import EMBED_MODEL, LLM_MODEL, LLM_CHAR_BUDGET
+from config import EMBED_MODEL, LLM_MODEL, VISION_MODEL, LLM_CHAR_BUDGET, IMAGE_EXTENSIONS
 from extractor import extract
 from sampler import sample
 
@@ -109,10 +110,34 @@ def _call_embed(text: str) -> list[float]:
     return response["embedding"]
 
 
+def _call_vision(image_bytes: bytes) -> str:
+    """Use qwen2.5vl to describe an image. Returns a text description."""
+    import base64
+    b64 = base64.b64encode(image_bytes).decode()
+    response = ollama.chat(
+        model=VISION_MODEL,
+        messages=[{
+            "role": "user",
+            "content": (
+                "You are a document archivist. Describe this image in detail for search and archiving purposes. "
+                "Include any visible text, charts, diagrams, people, objects, colours, and context. "
+                "Be thorough — aim for 3-5 sentences."
+            ),
+            "images": [b64],
+        }],
+        options={"temperature": 0.1},
+    )
+    return response["message"]["content"].strip()
+
+
 def unload_models() -> None:
-    """Explicitly unload both models from RAM when indexing is complete."""
+    """Explicitly unload all models from RAM when indexing is complete."""
     try:
         ollama.chat(model=LLM_MODEL, messages=[], keep_alive=0)
+    except Exception:
+        pass
+    try:
+        ollama.chat(model=VISION_MODEL, messages=[], keep_alive=0)
     except Exception:
         pass
     try:
@@ -162,13 +187,32 @@ def process_file(
 
         # Text extraction + sampling
         extraction = extract(path)
-        sampled_text = sample(extraction.pages)
 
-        if not sampled_text.strip():
-            raise ValueError("No text could be extracted from this file.")
+        if extraction.is_image:
+            # ---------------------------------------------------------------
+            # Image path: use vision model to get a text description, then
+            # treat that description as the document's "text" content.
+            # ---------------------------------------------------------------
+            vision_error: str | None = None
+            try:
+                visual_description = _call_vision(extraction.image_bytes)
+            except Exception as ve:
+                vision_error = str(ve)
+                visual_description = f"[Image description unavailable: {vision_error}]"
 
+            # Feed visual description into the normal LLM pipeline
+            llm_text = visual_description[:LLM_CHAR_BUDGET]
+            sampled_text = visual_description  # for embedding
+        else:
+            # ---------------------------------------------------------------
+            # Normal text path
+            # ---------------------------------------------------------------
+            sampled_text = sample(extraction.pages)
+            if not sampled_text.strip():
+                raise ValueError("No text could be extracted from this file.")
+            llm_text = sampled_text[:LLM_CHAR_BUDGET]
+            vision_error = None
         # LLM analysis
-        llm_text = sampled_text[:LLM_CHAR_BUDGET]
         llm_error: str | None = None
         try:
             llm_data = _call_llm(llm_text)

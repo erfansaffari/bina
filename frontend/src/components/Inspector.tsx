@@ -136,14 +136,14 @@ export default function Inspector({ node, open, onClose }: Props) {
       {/* Actions */}
       <div className="px-5 py-4 border-t border-bina-border space-y-2">
         <button
-          onClick={() => openFile(node.id)}
+          onClick={() => openFile(node.path)}
           className="w-full flex items-center justify-center gap-2 bg-bina-accent hover:bg-bina-accent/80 text-white text-sm font-medium rounded-xl py-2.5 transition-colors"
         >
           <ExternalLink className="w-4 h-4" />
           Open File
         </button>
         <button
-          onClick={() => showInFinder(node.id)}
+          onClick={() => showInFinder(node.path)}
           className="w-full flex items-center justify-center gap-2 bg-bina-border/60 hover:bg-bina-border text-bina-text/80 text-sm font-medium rounded-xl py-2.5 transition-colors"
         >
           <Folder className="w-4 h-4" />
