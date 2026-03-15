@@ -178,8 +178,21 @@ def query(
         top_k=n_results,
     )
 
+    if not results:
+        return []
+
     output = []
-    matches = results.get("matches", results.get("results", []))
+    # SDK may return a dict OR a list directly depending on version
+    if isinstance(results, list):
+        matches = results
+    elif isinstance(results, dict):
+        matches = results.get("matches", results.get("results", []))
+    else:
+        # Unexpected type — try iterating, else give up
+        try:
+            matches = list(results)
+        except Exception:
+            return []
     for match in matches:
         doc_id = match.get("id", "")
         score = float(match.get("score", 0.0))

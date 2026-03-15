@@ -458,8 +458,10 @@ def progress():
 
 @app.post("/search")
 def search(req: SearchRequest):
-    vstore = vector_store_router.get_store(req.workspace_id)
-    if vstore.count() == 0:
+    # Guard: use SQLite (always reliable) to check if anything is indexed.
+    # Vector store count() is unreliable (Moorcheh returns 0 on namespace issues).
+    ws_files = store.get_files_for_workspace(req.workspace_id)
+    if not ws_files:
         return {"nodes": [], "edges": [], "query": req.query, "ms": 0}
 
     import time

@@ -152,7 +152,9 @@ export default function MainLayout({ initialStatus = null, onNeedOnboarding = ()
         setSelectedNode({ ...fullNode, score: top.score })
         setInspectorOpen(true)
       }
-    } catch {}
+    } catch (err) {
+      console.error('[search] failed:', err)
+    }
   }, [activeWorkspaceId, fullNodes])
 
   const handleNodeClick = useCallback((node: GraphNode) => {

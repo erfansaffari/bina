@@ -1,29 +1,28 @@
 /**
- * Knowledge graph — D3 v7 simulation + Canvas.
+ * Knowledge graph — D3 v7 + Canvas.
  *
- * All nodes always visible. Structural groups kept apart by cluster forces
- * (forceX/Y targeting each group's centre). Group rings drawn behind nodes.
- * Click a node → focus its whole group. Click legend row → same.
+ * Group rings separate structural clusters. Dense node clumps (2-core within
+ * a group) auto-collapse into one sub-cluster node — click to expand, right-
+ * click member → "Collapse sub-group". Labels only on hover/selected (or all
+ * group members when a group is focused).
  *
- * Pan/zoom is MANUAL (no d3-zoom) to keep click events clean.
+ * Pan/zoom MANUAL (no d3-zoom).
  */
-import {
-  useRef, useCallback, useEffect, useState, useMemo,
-} from 'react'
+import { useRef, useCallback, useEffect, useState, useMemo } from 'react'
 import * as d3 from 'd3'
 import type { GraphNode, GraphEdge } from '../types'
 import { openFile, showInFinder, api } from '../api'
 import { useAppStore } from '../store/appStore'
 
-// ── Community palette ─────────────────────────────────────────────────────────
+// ── Palette ───────────────────────────────────────────────────────────────────
 const COMMUNITY_PALETTE = [
   '#5e7ce6', '#0d9488', '#d97706', '#dc2626',
   '#7c3aed', '#db2777', '#16a34a', '#0891b2',
 ]
-function communityColor(id: number): string {
+function communityColor(id: number) {
   return COMMUNITY_PALETTE[(id ?? 0) % COMMUNITY_PALETTE.length]
 }
-function hexAlpha(hex: string, a: number): string {
+function hexAlpha(hex: string, a: number) {
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
@@ -35,28 +34,99 @@ type SimNode = GraphNode & {
   fx?: number | null; fy?: number | null
 }
 type SimLink = {
-  source: SimNode | string
-  target: SimNode | string
-  weight: number
-  forced?: boolean
+  source: SimNode | string; target: SimNode | string
+  weight: number; forced?: boolean
 }
 
-interface Transform { x: number; y: number; k: number }
+interface SubClusterMeta {
+  id: string           // stable: "sc-" + sorted first member hash
+  groupId: number
+  nodeIds: string[]
+  label: string        // first member's name (truncated)
+}
 
-interface Props {
-  nodes: GraphNode[]
-  edges: GraphEdge[]
-  selectedNodeId: string | null
-  searchScores: Map<string, number> | null
-  onNodeClick: (node: GraphNode) => void
-  onNodeDeleted?: () => void
+// ── 2-core sub-cluster detection ──────────────────────────────────────────────
+// Within each structural group, find densely connected subgraphs (every node
+// has ≥2 intra-group neighbours). Stable cluster IDs use the first sorted hash.
+function computeSubClusters(
+  nodes: GraphNode[],
+  adj: Map<string, Set<string>>,
+): { map: Map<string, string>; list: SubClusterMeta[] } {
+  const map = new Map<string, string>()   // nodeId → clusterId
+  const byGroup = new Map<number, string[]>()
+  nodes.forEach(n => {
+    const cid = n.community_id ?? 0
+    if (!byGroup.has(cid)) byGroup.set(cid, [])
+    byGroup.get(cid)!.push(n.id)
+  })
+
+  byGroup.forEach((nodeIds, gid) => {
+    const nodeSet = new Set(nodeIds)
+
+    // Intra-group degree
+    const deg = new Map<string, number>()
+    nodeIds.forEach(id => {
+      let d = 0; adj.get(id)?.forEach(nbr => { if (nodeSet.has(nbr)) d++ }); deg.set(id, d)
+    })
+
+    // 2-core peeling
+    const core = new Set(nodeIds)
+    let changed = true
+    while (changed) {
+      changed = false
+      core.forEach(id => {
+        if ((deg.get(id) ?? 0) < 2) {
+          core.delete(id)
+          adj.get(id)?.forEach(nbr => {
+            if (core.has(nbr)) deg.set(nbr, (deg.get(nbr) ?? 0) - 1)
+          })
+          changed = true
+        }
+      })
+    }
+    if (core.size < 3) return
+
+    // Connected components within 2-core, size 3-15
+    const visited = new Set<string>()
+    core.forEach(startId => {
+      if (visited.has(startId)) return
+      const comp: string[] = []
+      const queue = [startId]
+      while (queue.length > 0) {
+        const cur = queue.shift()!
+        if (visited.has(cur)) continue
+        visited.add(cur); comp.push(cur)
+        adj.get(cur)?.forEach(nbr => {
+          if (!visited.has(nbr) && core.has(nbr)) queue.push(nbr)
+        })
+      }
+      if (comp.length >= 3 && comp.length <= 15) {
+        // Stable ID: first node hash in sorted order
+        const cid = 'sc-' + [...comp].sort()[0].slice(0, 8)
+        comp.forEach(id => map.set(id, cid))
+      }
+    })
+  })
+
+  // Build meta list
+  const metaMap = new Map<string, SubClusterMeta>()
+  nodes.forEach(n => {
+    const cid = map.get(n.id)
+    if (!cid) return
+    if (!metaMap.has(cid)) {
+      metaMap.set(cid, { id: cid, groupId: n.community_id ?? 0, nodeIds: [], label: '' })
+    }
+    const m = metaMap.get(cid)!
+    m.nodeIds.push(n.id)
+    if (!m.label) m.label = (n.name || '').replace(/\.[^.]+$/, '').slice(0, 15)
+  })
+
+  return { map, list: Array.from(metaMap.values()) }
 }
 
 // ── Group legend ──────────────────────────────────────────────────────────────
 function CommunityLegend({
-  groups,
-  focusedGroup,
-  onGroupClick,
+  groups, focusedGroup, onGroupClick,
 }: {
   groups: { id: number; label: string; count: number }[]
   focusedGroup: number | null
@@ -83,18 +153,14 @@ function CommunityLegend({
               return (
                 <button
                   key={g.id}
-                  className={`flex items-center gap-2 w-full text-left px-2 py-1 rounded-lg transition-colors ${
-                    isFocused ? 'bg-white/10' : 'hover:bg-white/5'
-                  }`}
+                  className={`flex items-center gap-2 w-full text-left px-2 py-1 rounded-lg transition-colors ${isFocused ? 'bg-white/10' : 'hover:bg-white/5'}`}
                   onClick={() => onGroupClick(isFocused ? null : g.id)}
                 >
                   <div
                     className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                     style={{ backgroundColor: communityColor(g.id), boxShadow: isFocused ? `0 0 6px ${communityColor(g.id)}` : undefined }}
                   />
-                  <span className={`text-[11px] whitespace-nowrap ${isFocused ? 'text-white' : 'text-white/70'}`}>
-                    {g.label}
-                  </span>
+                  <span className={`text-[11px] whitespace-nowrap ${isFocused ? 'text-white' : 'text-white/70'}`}>{g.label}</span>
                   <span className="text-[10px] text-white/30 ml-auto">{g.count}</span>
                 </button>
               )
@@ -104,6 +170,17 @@ function CommunityLegend({
       </div>
     </div>
   )
+}
+
+interface Transform { x: number; y: number; k: number }
+
+interface Props {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  selectedNodeId: string | null
+  searchScores: Map<string, number> | null
+  onNodeClick: (node: GraphNode) => void
+  onNodeDeleted?: () => void
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -118,95 +195,53 @@ export default function GraphCanvas({
   const simNodesRef   = useRef<SimNode[]>([])
   const simLinksRef   = useRef<SimLink[]>([])
 
+  // Sub-cluster state
+  const clusterMapRef     = useRef(new Map<string, string>())   // nodeId → clusterId
+  const clusterMetaRef     = useRef<SubClusterMeta[]>([])
+  const clusterMetricsRef  = useRef(new Map<string, { cx: number; cy: number; r: number; groupId: number }>())
+  const closeButtonsRef    = useRef(new Map<string, { x: number; y: number }>())
+  const topoFingerprintRef = useRef('')
+  const [expandedClusters, setExpandedClusters] = useState(new Set<string>())
+  const expandedClustersRef = useRef(new Set<string>())
+  useEffect(() => { expandedClustersRef.current = expandedClusters }, [expandedClusters])
+
   const activeWorkspaceId = useAppStore(s => s.activeWorkspaceId)
 
-  // ── UI state ──────────────────────────────────────────────────────────────
-  const [ctxMenu,       setCtxMenu]       = useState<{ x: number; y: number; node: GraphNode } | null>(null)
-  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null)
-  const [focusedGroup,  setFocusedGroup]  = useState<number | null>(null)
-  const [localDepth,    setLocalDepth]    = useState<1 | 2 | 3>(1)
-  const [dims,          setDims]          = useState({ w: 800, h: 600 })
-  const [cursor,        setCursor]        = useState<'default' | 'pointer' | 'grab' | 'grabbing'>('default')
+  const [ctxMenu,      setCtxMenu]      = useState<{ x: number; y: number; node: GraphNode } | null>(null)
+  const [focusedGroup, setFocusedGroup] = useState<number | null>(null)
+  const [dims,         setDims]         = useState({ w: 800, h: 600 })
+  const [cursor,       setCursor]       = useState<'default' | 'pointer' | 'grab' | 'grabbing'>('default')
 
-  // Refs synced with state/props
-  const focusedNodeIdRef  = useRef<string | null>(null)
   const focusedGroupRef   = useRef<number | null>(null)
-  const localDepthRef     = useRef<1 | 2 | 3>(1)
   const hoveredNodeRef    = useRef<SimNode | null>(null)
+  const hoveredClusterRef = useRef<string | null>(null)
   const onNodeClickRef    = useRef(onNodeClick)
   const onNodeDeletedRef  = useRef(onNodeDeleted)
   const dimsRef           = useRef(dims)
   const selectedNodeIdRef = useRef(selectedNodeId)
   const searchScoresRef   = useRef(searchScores)
+  const adjRef            = useRef(new Map<string, Set<string>>())
+  const degreeMapRef      = useRef(new Map<string, number>())
 
-  useEffect(() => { focusedNodeIdRef.current  = focusedNodeId }, [focusedNodeId])
   useEffect(() => { focusedGroupRef.current   = focusedGroup  }, [focusedGroup])
-  useEffect(() => { localDepthRef.current     = localDepth    }, [localDepth])
   useEffect(() => { onNodeClickRef.current    = onNodeClick   }, [onNodeClick])
   useEffect(() => { onNodeDeletedRef.current  = onNodeDeleted }, [onNodeDeleted])
   useEffect(() => { dimsRef.current           = dims          }, [dims])
   useEffect(() => { selectedNodeIdRef.current = selectedNodeId }, [selectedNodeId])
   useEffect(() => { searchScoresRef.current   = searchScores  }, [searchScores])
 
-  // ── Pointer state (refs only — no re-renders) ─────────────────────────────
   const dragNodeRef    = useRef<SimNode | null>(null)
   const dragStartRef   = useRef<{ x: number; y: number } | null>(null)
   const dragMovedRef   = useRef(false)
   const isPanningRef   = useRef(false)
   const panStartRef    = useRef({ x: 0, y: 0, tx: 0, ty: 0 })
-  const clickTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastClickNodeIdRef = useRef<string | null>(null)
-  const smoothAnimRef = useRef<number>(0)
+  const clickTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastClickRef   = useRef<string | null>(null)
+  const smoothAnimRef  = useRef<number>(0)
 
-  // ── Degree map ────────────────────────────────────────────────────────────
-  const degreeMap = useMemo(() => {
-    const m = new Map<string, number>()
-    edges.forEach(e => {
-      const s = typeof e.source === 'string' ? e.source : (e.source as GraphNode).id
-      const t = typeof e.target === 'string' ? e.target : (e.target as GraphNode).id
-      m.set(s, (m.get(s) ?? 0) + 1)
-      m.set(t, (m.get(t) ?? 0) + 1)
-    })
-    return m
-  }, [edges])
-  const degreeMapRef = useRef(degreeMap)
-  useEffect(() => { degreeMapRef.current = degreeMap }, [degreeMap])
+  const groupTargetsRef = useRef(new Map<number, { x: number; y: number }>())
 
-  // ── Adjacency index ────────────────────────────────────────────────────────
-  const adjRef = useRef<Map<string, Set<string>>>(new Map())
-  useEffect(() => {
-    const adj = new Map<string, Set<string>>()
-    edges.forEach(e => {
-      const s = typeof e.source === 'string' ? e.source : (e.source as GraphNode).id
-      const t = typeof e.target === 'string' ? e.target : (e.target as GraphNode).id
-      if (!adj.has(s)) adj.set(s, new Set())
-      if (!adj.has(t)) adj.set(t, new Set())
-      adj.get(s)!.add(t)
-      adj.get(t)!.add(s)
-    })
-    adjRef.current = adj
-  }, [edges])
-
-  function getNeighbourhood(nodeId: string, depth: number): Set<string> {
-    const visited = new Set<string>([nodeId])
-    let frontier  = new Set<string>([nodeId])
-    for (let d = 0; d < depth; d++) {
-      const next = new Set<string>()
-      frontier.forEach(id => {
-        adjRef.current.get(id)?.forEach(nbr => {
-          if (!visited.has(nbr)) { visited.add(nbr); next.add(nbr) }
-        })
-      })
-      frontier = next
-    }
-    return visited
-  }
-
-  function nodeRadius(nodeId: string): number {
-    return 4 + Math.sqrt(degreeMapRef.current.get(nodeId) ?? 0) * 2
-  }
-
-  // ── Group list derived from nodes ─────────────────────────────────────────
+  // ── Group list ────────────────────────────────────────────────────────────
   const groupList = useMemo(() => {
     const m = new Map<number, { label: string; count: number }>()
     nodes.forEach(n => {
@@ -219,22 +254,15 @@ export default function GraphCanvas({
       .sort((a, b) => b.count - a.count)
   }, [nodes])
 
-  // Group target positions — arranged in a circle around canvas centre.
-  // Used by cluster forces to nudge same-group nodes together.
-  const groupTargetsRef = useRef<Map<number, { x: number; y: number }>>(new Map())
   useEffect(() => {
     const { w, h } = dimsRef.current
-    const cx = w / 2, cy = h / 2
-    const n = groupList.length
-    if (n === 0) return
+    const cx = w / 2, cy = h / 2, n = groupList.length
+    if (!n) return
     const radius = Math.min(cx, cy) * 0.38
     const targets = new Map<number, { x: number; y: number }>()
     groupList.forEach((g, i) => {
       const angle = (i / n) * 2 * Math.PI - Math.PI / 2
-      targets.set(g.id, {
-        x: cx + Math.cos(angle) * radius,
-        y: cy + Math.sin(angle) * radius,
-      })
+      targets.set(g.id, { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius })
     })
     groupTargetsRef.current = targets
   }, [groupList, dims])
@@ -250,37 +278,64 @@ export default function GraphCanvas({
     return () => ro.disconnect()
   }, [])
 
-  // ── Quadtree hit-test ─────────────────────────────────────────────────────
-  function findNodeAt(clientX: number, clientY: number): SimNode | null {
-    const canvas = canvasRef.current
-    if (!canvas) return null
-    const rect        = canvas.getBoundingClientRect()
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function nodeRadius(id: string) { return 4 + Math.sqrt(degreeMapRef.current.get(id) ?? 0) * 2 }
+  function clusterRadius(count: number) { return 14 + Math.sqrt(count) * 3.5 }
+
+  function findNodeAt(cx: number, cy: number): SimNode | null {
+    const canvas = canvasRef.current; if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
     const { k, x: tx, y: ty } = transformRef.current
-    const wx = (clientX - rect.left - tx) / k
-    const wy = (clientY - rect.top  - ty) / k
-    const qt = d3.quadtree<SimNode>()
-      .x(d => d.x).y(d => d.y)
-      .addAll(simNodesRef.current)
-    return qt.find(wx, wy, (nodeRadius('') + 12) / k) ?? null
+    const wx = (cx - rect.left - tx) / k, wy = (cy - rect.top - ty) / k
+    // Only hit-test visible (non-collapsed) nodes
+    const visible = simNodesRef.current.filter(n => {
+      const cid = clusterMapRef.current.get(n.id)
+      return !cid || expandedClustersRef.current.has(cid)
+    })
+    return d3.quadtree<SimNode>().x(d => d.x).y(d => d.y).addAll(visible)
+      .find(wx, wy, (nodeRadius('') + 12) / k) ?? null
+  }
+
+  function findClusterAt(cx: number, cy: number): string | null {
+    const canvas = canvasRef.current; if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const { k, x: tx, y: ty } = transformRef.current
+    const wx = (cx - rect.left - tx) / k, wy = (cy - rect.top - ty) / k
+    for (const [cid, m] of clusterMetricsRef.current.entries()) {
+      if (expandedClustersRef.current.has(cid)) continue
+      const dx = wx - m.cx, dy = wy - m.cy
+      if (dx * dx + dy * dy <= m.r * m.r) return cid
+    }
+    return null
+  }
+
+  // Hit-test the "×" close button drawn at top of each expanded cluster ring
+  function findCollapseButtonAt(cx: number, cy: number): string | null {
+    const canvas = canvasRef.current; if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const { k, x: tx, y: ty } = transformRef.current
+    const wx = (cx - rect.left - tx) / k, wy = (cy - rect.top - ty) / k
+    for (const [cid, btn] of closeButtonsRef.current.entries()) {
+      const dx = wx - btn.x, dy = wy - btn.y
+      if (dx * dx + dy * dy <= 100) return cid  // 10px radius
+    }
+    return null
   }
 
   // ── Canvas render ─────────────────────────────────────────────────────────
   const render = useCallback(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx   = canvas.getContext('2d')
-    if (!ctx) return
+    const canvas = canvasRef.current; if (!canvas) return
+    const ctx = canvas.getContext('2d'); if (!ctx) return
 
     const { k, x: tx, y: ty } = transformRef.current
-    const simNodes   = simNodesRef.current
-    const simLinks   = simLinksRef.current
-    const focusedNId = focusedNodeIdRef.current
-    const focusedG   = focusedGroupRef.current
-    const hovered    = hoveredNodeRef.current
-    const depth      = localDepthRef.current
-    const selId      = selectedNodeIdRef.current
-    const scores     = searchScoresRef.current
-    const dpr        = window.devicePixelRatio || 1
+    const simNodes  = simNodesRef.current
+    const simLinks  = simLinksRef.current
+    const focusedG  = focusedGroupRef.current
+    const hovered   = hoveredNodeRef.current
+    const hCluster  = hoveredClusterRef.current
+    const selId     = selectedNodeIdRef.current
+    const scores    = searchScoresRef.current
+    const dpr       = window.devicePixelRatio || 1
 
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.save()
@@ -288,169 +343,304 @@ export default function GraphCanvas({
     ctx.translate(tx, ty)
     ctx.scale(k, k)
 
-    // Determine visibility sets
-    const visibleIds = focusedNId ? getNeighbourhood(focusedNId, depth) : null
+    // ── Compute cluster metrics (centroid + radius per cluster) ───────────
+    const cMetrics = new Map<string, { cx: number; cy: number; r: number; groupId: number; count: number }>()
+    for (const meta of clusterMetaRef.current) {
+      let sx = 0, sy = 0, cnt = 0
+      meta.nodeIds.forEach(id => {
+        const n = simNodes.find(sn => sn.id === id)
+        if (n) { sx += n.x; sy += n.y; cnt++ }
+      })
+      if (cnt > 0) {
+        const ccx = sx / cnt, ccy = sy / cnt
+        let r = clusterRadius(meta.nodeIds.length)
+        if (expandedClustersRef.current.has(meta.id)) {
+          // For expanded clusters, use the actual bounding radius
+          meta.nodeIds.forEach(id => {
+            const n = simNodes.find(sn => sn.id === id)
+            if (n) {
+              const dist = Math.sqrt((n.x - ccx) ** 2 + (n.y - ccy) ** 2) + nodeRadius(id) + 16
+              if (dist > r) r = dist
+            }
+          })
+        }
+        cMetrics.set(meta.id, { cx: ccx, cy: ccy, r, groupId: meta.groupId, count: meta.nodeIds.length })
+      }
+    }
+    clusterMetricsRef.current = cMetrics
 
-    // Determine which group is active (node focus takes priority)
-    const activeGroup = focusedNId
-      ? (simNodes.find(n => n.id === focusedNId)?.community_id ?? null)
-      : focusedG
+    // Set of hidden node IDs (members of collapsed clusters)
+    const hidden = new Set<string>()
+    for (const meta of clusterMetaRef.current) {
+      if (!expandedClustersRef.current.has(meta.id)) {
+        meta.nodeIds.forEach(id => hidden.add(id))
+      }
+    }
 
     // ── Phase 1: Group rings ───────────────────────────────────────────────
-    // Compute centroids + radii from current sim positions
-    const groupStats = new Map<number, { sx: number; sy: number; count: number; maxDist: number }>()
-    simNodes.forEach(n => {
-      const cid = n.community_id ?? 0
-      if (!groupStats.has(cid)) groupStats.set(cid, { sx: 0, sy: 0, count: 0, maxDist: 0 })
-      const s = groupStats.get(cid)!
-      s.sx += n.x; s.sy += n.y; s.count++
+    const gStats = new Map<number, { sx: number; sy: number; n: number }>()
+    simNodes.forEach(node => {
+      if (hidden.has(node.id)) return
+      const cid = node.community_id ?? 0
+      if (!gStats.has(cid)) gStats.set(cid, { sx: 0, sy: 0, n: 0 })
+      const s = gStats.get(cid)!; s.sx += node.x; s.sy += node.y; s.n++
     })
-    // centroid pass
-    const groupCentroids = new Map<number, { cx: number; cy: number; r: number; label: string }>()
-    groupStats.forEach((s, cid) => {
-      const cx = s.sx / s.count, cy = s.sy / s.count
-      groupCentroids.set(cid, { cx, cy, r: 0, label: '' })
+    // Include collapsed cluster centroids in group ring computation
+    cMetrics.forEach((m, scid) => {
+      if (!expandedClustersRef.current.has(scid)) {
+        if (!gStats.has(m.groupId)) gStats.set(m.groupId, { sx: 0, sy: 0, n: 0 })
+        const s = gStats.get(m.groupId)!; s.sx += m.cx; s.sy += m.cy; s.n++
+      }
     })
-    // radius pass
+
+    type GC = { cx: number; cy: number; r: number; label: string }
+    const gCentroids = new Map<number, GC>()
+    gStats.forEach((s, cid) => {
+      if (s.n > 0) gCentroids.set(cid, { cx: s.sx / s.n, cy: s.sy / s.n, r: 0, label: '' })
+    })
     simNodes.forEach(n => {
-      const cid = n.community_id ?? 0
-      const c = groupCentroids.get(cid)!
-      const dist = Math.sqrt((n.x - c.cx) ** 2 + (n.y - c.cy) ** 2) + nodeRadius(n.id) + 18
-      if (dist > c.r) c.r = dist
+      if (hidden.has(n.id)) return
+      const c = gCentroids.get(n.community_id ?? 0); if (!c) return
+      const d = Math.sqrt((n.x - c.cx) ** 2 + (n.y - c.cy) ** 2) + nodeRadius(n.id) + 22
+      if (d > c.r) c.r = d
       c.label = n.community_label || 'Other'
     })
+    cMetrics.forEach((m, scid) => {
+      if (expandedClustersRef.current.has(scid)) return
+      const c = gCentroids.get(m.groupId); if (!c) return
+      const d = Math.sqrt((m.cx - c.cx) ** 2 + (m.cy - c.cy) ** 2) + m.r + 22
+      if (d > c.r) c.r = d
+    })
 
-    groupCentroids.forEach((c, cid) => {
+    gCentroids.forEach((c, cid) => {
       if (c.r < 1) return
       const color = communityColor(cid)
-      const isFocused = activeGroup === cid
-      const isOther   = activeGroup !== null && !isFocused
+      // In search mode, rings are neutral (focusedG was cleared on search start)
+      const isFocus = scores === null && focusedG === cid
+      const isOther = scores === null && focusedG !== null && !isFocus
 
       ctx.save()
-      ctx.globalAlpha = isOther ? 0.03 : isFocused ? 0.12 : 0.07
+      ctx.globalAlpha = isOther ? 0.03 : isFocus ? 0.13 : 0.07
+      ctx.beginPath(); ctx.arc(c.cx, c.cy, c.r, 0, Math.PI * 2)
+      ctx.fillStyle = color; ctx.fill()
 
-      // Fill ring
-      ctx.beginPath()
-      ctx.arc(c.cx, c.cy, c.r, 0, Math.PI * 2)
-      ctx.fillStyle = color
-      ctx.fill()
+      ctx.globalAlpha = isOther ? 0.04 : isFocus ? 0.55 : 0.2
+      ctx.strokeStyle = color; ctx.lineWidth = isFocus ? 1.5 : 1
+      if (!isFocus) ctx.setLineDash([5, 6])
+      ctx.stroke(); ctx.setLineDash([])
 
-      ctx.globalAlpha = isOther ? 0.04 : isFocused ? 0.5 : 0.18
-      ctx.strokeStyle = color
-      ctx.lineWidth = isFocused ? 1.5 : 1
-      if (!isFocused) ctx.setLineDash([5, 6])
-      ctx.stroke()
-      ctx.setLineDash([])
-
-      // Group label above ring
-      ctx.globalAlpha = isOther ? 0.08 : isFocused ? 0.9 : 0.4
-      const labelFs = Math.max(9, Math.min(13, 11 / Math.max(k * 0.5, 0.3)))
-      ctx.font = `600 ${labelFs}px -apple-system, BlinkMacSystemFont, sans-serif`
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'bottom'
+      ctx.globalAlpha = isOther ? 0.08 : isFocus ? 0.9 : 0.45
+      const fs = Math.max(9, Math.min(13, 11 / Math.max(k * 0.5, 0.3)))
+      ctx.font = `600 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
+      ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
       ctx.fillStyle = color
       ctx.fillText(c.label, c.cx, c.cy - c.r + 2)
       ctx.restore()
     })
 
     // ── Phase 2: Edges ────────────────────────────────────────────────────
+    // Aggregate edges that touch collapsed cluster nodes
+    type AggEdge = { x1: number; y1: number; x2: number; y2: number; w: number; color: string }
+    const aggEdges = new Map<string, AggEdge>()
+
     simLinks.forEach(link => {
-      const s = link.source as SimNode
-      const t = link.target as SimNode
-      if (s.x == null || t.x == null) return
+      const s = link.source as SimNode, t = link.target as SimNode
+      if (!s?.x || !t?.x) return
 
-      const weight      = link.weight ?? 0.5
-      const crossGroup  = (s.community_id ?? 0) !== (t.community_id ?? 0)
-      let alpha         = crossGroup
-        ? 0.06 + weight * 0.08   // cross-group: subtle
-        : 0.15 + weight * 0.4    // same-group: normal
+      const sCid = clusterMapRef.current.get(s.id)
+      const tCid = clusterMapRef.current.get(t.id)
+      const sColl = !!sCid && !expandedClustersRef.current.has(sCid)
+      const tColl = !!tCid && !expandedClustersRef.current.has(tCid)
 
-      // Dim edges when a group is focused
-      if (activeGroup !== null) {
-        const sInGroup = (s.community_id ?? 0) === activeGroup
-        const tInGroup = (t.community_id ?? 0) === activeGroup
-        if (!sInGroup && !tInGroup) alpha *= 0.1
-        else if (!sInGroup || !tInGroup) alpha *= 0.3  // cross-group edge to focused group
-      } else if (visibleIds) {
-        alpha = (visibleIds.has(s.id) && visibleIds.has(t.id)) ? alpha : 0.04
+      if (sColl || tColl) {
+        if (sColl && tColl && sCid === tCid) return   // intra-cluster: skip
+        const sm = sColl ? cMetrics.get(sCid!) : null
+        const tm = tColl ? cMetrics.get(tCid!) : null
+        const x1 = sm ? sm.cx : s.x, y1 = sm ? sm.cy : s.y
+        const x2 = tm ? tm.cx : t.x, y2 = tm ? tm.cy : t.y
+        const key = `${x1.toFixed(0)},${y1.toFixed(0)}|${x2.toFixed(0)},${y2.toFixed(0)}`
+        if (!aggEdges.has(key)) {
+          aggEdges.set(key, { x1, y1, x2, y2, w: 0, color: communityColor(s.community_id ?? 0) })
+        }
+        aggEdges.get(key)!.w += link.weight
+        return
+      }
+
+      // Regular edge
+      const cross = (s.community_id ?? 0) !== (t.community_id ?? 0)
+      let alpha = cross ? 0.06 + link.weight * 0.08 : 0.15 + link.weight * 0.4
+
+      // Search mode takes priority over group focus (same mutual exclusion as nodes)
+      if (scores !== null) {
+        const sMatch = (scores.get(s.id) ?? 0) > 0
+        const tMatch = (scores.get(t.id) ?? 0) > 0
+        if (sMatch && tMatch)      alpha = Math.min(alpha * 1.4, 0.85)  // both match: bright
+        else if (sMatch || tMatch) alpha *= 0.3                           // one match: subtle
+        else                       alpha = 0.03                           // no match: almost invisible
+      } else if (focusedG !== null) {
+        const sIn = (s.community_id ?? 0) === focusedG
+        const tIn = (t.community_id ?? 0) === focusedG
+        if (!sIn && !tIn) alpha *= 0.08
+        else if (!sIn || !tIn) alpha *= 0.25
       } else if (hovered) {
-        const adj  = adjRef.current.get(hovered.id)
+        const adj = adjRef.current.get(hovered.id)
         const near = s.id === hovered.id || t.id === hovered.id
                   || (adj?.has(s.id) ?? false) || (adj?.has(t.id) ?? false)
         alpha = near ? Math.min(alpha * 1.5, 0.9) : 0.04
-      } else if (scores) {
-        alpha = (scores.has(s.id) && scores.has(t.id)) ? alpha : 0.04
       }
 
       ctx.save()
       ctx.globalAlpha = alpha
       ctx.strokeStyle = communityColor(s.community_id ?? 0)
-      ctx.lineWidth   = crossGroup ? weight * 1.2 : weight * 2.5
-      if (link.forced || crossGroup) ctx.setLineDash(crossGroup ? [3, 5] : [4, 5])
-      ctx.beginPath()
-      ctx.moveTo(s.x, s.y)
-      ctx.lineTo(t.x, t.y)
-      ctx.stroke()
-      ctx.setLineDash([])
+      ctx.lineWidth = cross ? link.weight * 1.2 : link.weight * 2.5
+      if (link.forced || cross) ctx.setLineDash(cross ? [3, 5] : [4, 5])
+      ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y)
+      ctx.stroke(); ctx.setLineDash([])
       ctx.restore()
     })
 
-    // ── Phase 3: Nodes ─────────────────────────────────────────────────────
-    simNodes.forEach(node => {
-      const r          = nodeRadius(node.id)
-      const color      = communityColor(node.community_id ?? 0)
-      const isSelected = node.id === selId
-      const isHovered  = node === hovered
-      const deg        = degreeMapRef.current.get(node.id) ?? 0
-      const score      = scores?.get(node.id) ?? 0
-      const isMatch    = scores !== null && score > 0
-      const inGroup    = activeGroup === null || (node.community_id ?? 0) === activeGroup
+    // Draw aggregated cluster edges
+    aggEdges.forEach(e => {
+      const faded = focusedG !== null
+      ctx.save()
+      ctx.globalAlpha = faded ? 0.08 : 0.35
+      ctx.strokeStyle = e.color
+      ctx.lineWidth = Math.min(1 + Math.sqrt(e.w * 8), 5)
+      ctx.setLineDash([4, 4])
+      ctx.beginPath(); ctx.moveTo(e.x1, e.y1); ctx.lineTo(e.x2, e.y2)
+      ctx.stroke(); ctx.setLineDash([])
+      ctx.restore()
+    })
 
+    // ── Phase 3a: Expanded cluster rings + close buttons ─────────────────
+    const newCloseButtons = new Map<string, { x: number; y: number }>()
+    for (const meta of clusterMetaRef.current) {
+      if (!expandedClustersRef.current.has(meta.id)) continue
+      const m = cMetrics.get(meta.id); if (!m || m.r < 5) continue
+      const color = communityColor(m.groupId)
+      const isOther = focusedG !== null && m.groupId !== focusedG
+
+      // Subtle dashed ring around expanded cluster
+      ctx.save()
+      ctx.globalAlpha = isOther ? 0.05 : 0.2
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1
+      ctx.setLineDash([4, 5])
+      ctx.beginPath(); ctx.arc(m.cx, m.cy, m.r, 0, Math.PI * 2)
+      ctx.stroke(); ctx.setLineDash([])
+      ctx.restore()
+
+      // Close "×" button at top of ring
+      const btnX = m.cx, btnY = m.cy - m.r - 1
+      newCloseButtons.set(meta.id, { x: btnX, y: btnY })
+
+      ctx.save()
+      ctx.globalAlpha = isOther ? 0.12 : 1
+      ctx.beginPath(); ctx.arc(btnX, btnY, 8, 0, Math.PI * 2)
+      ctx.fillStyle = hexAlpha(color, 0.85); ctx.fill()
+      ctx.font = `bold 11px -apple-system, BlinkMacSystemFont, sans-serif`
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText('×', btnX, btnY + 0.5)
+      ctx.restore()
+    }
+    closeButtonsRef.current = newCloseButtons
+
+    // ── Phase 3b: Collapsed cluster nodes ─────────────────────────────────
+    for (const meta of clusterMetaRef.current) {
+      if (expandedClustersRef.current.has(meta.id)) continue
+      const m = cMetrics.get(meta.id); if (!m) continue
+      const color = communityColor(m.groupId)
+      const isHov = hCluster === meta.id
+      const isOther = focusedG !== null && m.groupId !== focusedG
+
+      ctx.save()
+      ctx.globalAlpha = isOther ? 0.18 : 1
+
+      // Hover glow
+      if (isHov) {
+        const grd = ctx.createRadialGradient(m.cx, m.cy, m.r * 0.5, m.cx, m.cy, m.r + 12)
+        grd.addColorStop(0, hexAlpha(color, 0.2)); grd.addColorStop(1, hexAlpha(color, 0))
+        ctx.beginPath(); ctx.arc(m.cx, m.cy, m.r + 12, 0, Math.PI * 2)
+        ctx.fillStyle = grd; ctx.fill()
+      }
+
+      // Fill
+      ctx.beginPath(); ctx.arc(m.cx, m.cy, m.r, 0, Math.PI * 2)
+      ctx.fillStyle = hexAlpha(color, isHov ? 0.22 : 0.1); ctx.fill()
+
+      // Dashed border (signals expandable)
+      ctx.strokeStyle = hexAlpha(color, isHov ? 0.95 : 0.55)
+      ctx.lineWidth = isHov ? 2.5 : 1.5
+      ctx.setLineDash([5, 4]); ctx.stroke(); ctx.setLineDash([])
+
+      // Label
+      const fs = Math.max(9.5, Math.min(12, 10.5 / Math.max(k * 0.5, 0.3)))
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillStyle = isHov ? '#ffffff' : hexAlpha('#ffffff', 0.78)
+      ctx.font = `600 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
+      ctx.fillText(meta.label, m.cx, m.cy - fs * 0.55)
+
+      ctx.font = `400 ${fs * 0.82}px -apple-system, BlinkMacSystemFont, sans-serif`
+      ctx.fillStyle = hexAlpha('#ffffff', 0.42)
+      ctx.fillText(`${meta.nodeIds.length} files  ▸`, m.cx, m.cy + fs * 0.65)
+
+      ctx.restore()
+    }
+
+    // ── Phase 4: Regular nodes ─────────────────────────────────────────────
+    simNodes.forEach(node => {
+      if (hidden.has(node.id)) return
+
+      const r = nodeRadius(node.id)
+      const color = communityColor(node.community_id ?? 0)
+      const isSel   = node.id === selId
+      const isHov   = node === hovered
+      const inGroup = focusedG === null || (node.community_id ?? 0) === focusedG
+      const score   = scores?.get(node.id) ?? 0
+      const isMatch = scores !== null && score > 0
+
+      // Priority: search scores > group focus > hover dim
+      // Search mode and group focus are mutually exclusive: clearing focusedGroup
+      // on search ensures we never reach the group branch while scores are active.
       let alpha = 1
-      if (activeGroup !== null) {
+      if (scores !== null) {
+        alpha = (isMatch || isSel) ? 1 : 0.08
+      } else if (focusedG !== null) {
         alpha = inGroup ? 1 : 0.07
-      } else if (visibleIds) {
-        alpha = visibleIds.has(node.id) ? 1 : 0.08
-      } else if (scores && !isMatch && !isSelected) {
-        alpha = 0.12
-      } else if (hovered && !isHovered && !adjRef.current.get(hovered.id)?.has(node.id) && !isSelected) {
+      } else if (hovered && !isHov && !adjRef.current.get(hovered.id)?.has(node.id) && !isSel) {
         alpha = 0.20
       }
 
-      ctx.save()
-      ctx.globalAlpha = alpha
+      // Boost matched nodes slightly — make them appear larger
+      const rBoost = (isMatch && !isSel) ? r * 1.35 : r
+      ctx.save(); ctx.globalAlpha = alpha
 
-      // Glow halo
-      if (isSelected || isHovered) {
-        const haloR = r + (isSelected ? 10 : 6)
-        const g = ctx.createRadialGradient(node.x, node.y, r * 0.4, node.x, node.y, haloR)
-        g.addColorStop(0, hexAlpha(color, isSelected ? 0.5 : 0.28))
+      if (isSel || isHov || isMatch) {
+        const haloR = rBoost + (isSel ? 10 : isMatch ? 8 : 6)
+        const g = ctx.createRadialGradient(node.x, node.y, rBoost * 0.4, node.x, node.y, haloR)
+        g.addColorStop(0, hexAlpha(color, isSel ? 0.5 : isMatch ? 0.35 : 0.28))
         g.addColorStop(1, hexAlpha(color, 0))
-        ctx.beginPath()
-        ctx.arc(node.x, node.y, haloR, 0, Math.PI * 2)
-        ctx.fillStyle = g
-        ctx.fill()
+        ctx.beginPath(); ctx.arc(node.x, node.y, haloR, 0, Math.PI * 2)
+        ctx.fillStyle = g; ctx.fill()
       }
 
-      // Core dot
-      ctx.beginPath()
-      ctx.arc(node.x, node.y, r, 0, Math.PI * 2)
-      if (isSelected) {
+      ctx.beginPath(); ctx.arc(node.x, node.y, rBoost, 0, Math.PI * 2)
+      if (isSel) {
         ctx.fillStyle = '#ffffff'; ctx.fill()
         ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke()
       } else {
         ctx.fillStyle = color; ctx.fill()
       }
 
-      // Label — show when: selected, hovered, high-degree, focused group member
-      const showLabel = isSelected || isHovered || deg > 3 || (inGroup && activeGroup !== null)
+      // Show label: hover/selected, group focus members, or search matches
+      const showLabel = isSel || isHov || isMatch || (inGroup && focusedG !== null)
       if (showLabel) {
         const raw   = (node.label || node.name || '').replace(/\.[^.]+$/, '')
-        const label = raw.length > 28 ? raw.slice(0, 25) + '\u2026' : raw
-        const fs    = Math.max(10, Math.min(14, 12 / Math.max(k * 0.6, 0.4)))
-        ctx.font         = `500 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
-        ctx.textAlign    = 'center'
-        ctx.textBaseline = 'top'
+        const label = raw.length > 22 ? raw.slice(0, 19) + '\u2026' : raw
+        const fs    = Math.max(10, Math.min(13, 12 / Math.max(k * 0.6, 0.4)))
+        ctx.font = `500 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top'
         const labelY = node.y + r + 5 / Math.max(k, 0.5)
         const tw     = ctx.measureText(label).width
         const pad    = 4
@@ -458,7 +648,7 @@ export default function GraphCanvas({
         ctx.beginPath()
         ctx.roundRect(node.x - tw / 2 - pad, labelY - 1, tw + pad * 2, fs + 4, 4)
         ctx.fill()
-        ctx.fillStyle = isSelected ? '#ffffff' : hexAlpha(color, 0.95)
+        ctx.fillStyle = isSel ? '#ffffff' : hexAlpha(color, 0.95)
         ctx.fillText(label, node.x, labelY)
       }
 
@@ -469,13 +659,13 @@ export default function GraphCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── Smooth transform animation ────────────────────────────────────────────
+  // ── Smooth pan/zoom animation ─────────────────────────────────────────────
   function smoothTo(targetX: number, targetY: number, targetK: number, ms = 600) {
     cancelAnimationFrame(smoothAnimRef.current)
     const start = performance.now()
     const { x: x0, y: y0, k: k0 } = transformRef.current
     function step(now: number) {
-      const t    = Math.min((now - start) / ms, 1)
+      const t = Math.min((now - start) / ms, 1)
       const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t
       transformRef.current = {
         x: x0 + (targetX - x0) * ease,
@@ -488,57 +678,82 @@ export default function GraphCanvas({
     smoothAnimRef.current = requestAnimationFrame(step)
   }
 
-  // Focus a group: dim everything else and pan to its centroid
-  function focusGroup(groupId: number) {
+  function focusGroupAndPan(groupId: number) {
     setFocusedGroup(groupId)
-    setFocusedNodeId(null)
-
-    // Compute centroid of group members
-    const members = simNodesRef.current.filter(n => (n.community_id ?? 0) === groupId)
-    if (members.length === 0) return
+    const members = simNodesRef.current.filter(n => (n.community_id ?? 0) === groupId
+      && !(() => { const c = clusterMapRef.current.get(n.id); return c && !expandedClustersRef.current.has(c) })())
+    if (!members.length) return
     let cx = 0, cy = 0
     members.forEach(n => { cx += n.x; cy += n.y })
     cx /= members.length; cy /= members.length
-
     const { w, h } = dimsRef.current
-    const targetK = Math.min(transformRef.current.k * 1.2, 3)
+    const targetK = Math.min(transformRef.current.k * 1.15, 3.5)
     smoothTo(w / 2 - cx * targetK, h / 2 - cy * targetK, targetK, 600)
   }
 
-  function handleLegendClick(groupId: number | null) {
-    if (groupId === null) {
-      setFocusedGroup(null)
-      setFocusedNodeId(null)
-    } else {
-      focusGroup(groupId)
-    }
-    render()
-  }
-
-  // ── D3 simulation setup ───────────────────────────────────────────────────
+  // ── D3 simulation ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (nodes.length === 0) {
       simNodesRef.current = []; simLinksRef.current = []
+      clusterMapRef.current = new Map(); clusterMetaRef.current = []
+      topoFingerprintRef.current = ''
       simRef.current?.stop(); render(); return
     }
 
+    // Only restart simulation when topology changes (node IDs or edge connections).
+    // Score-only updates (from search) produce new node array refs but same topology
+    // — without this guard they restart the sim and cause the "waving" bug.
+    const nodeKey = nodes.map(n => n.id).sort().join(',')
+    const edgeKey = edges.map(e => {
+      const s = typeof e.source === 'string' ? e.source : (e.source as GraphNode).id
+      const t = typeof e.target === 'string' ? e.target : (e.target as GraphNode).id
+      return [s, t].sort().join('-')
+    }).sort().join(',')
+    const fingerprint = nodeKey + '|' + edgeKey
+    if (fingerprint === topoFingerprintRef.current) {
+      render(); return   // topology unchanged — just re-render (scores/meta changed)
+    }
+    topoFingerprintRef.current = fingerprint
+
+    // Build adjacency + degree maps
+    const adj  = new Map<string, Set<string>>()
+    const dm   = new Map<string, number>()
+    edges.forEach(e => {
+      const s = typeof e.source === 'string' ? e.source : (e.source as GraphNode).id
+      const t = typeof e.target === 'string' ? e.target : (e.target as GraphNode).id
+      if (!adj.has(s)) adj.set(s, new Set()); if (!adj.has(t)) adj.set(t, new Set())
+      adj.get(s)!.add(t); adj.get(t)!.add(s)
+      dm.set(s, (dm.get(s) ?? 0) + 1); dm.set(t, (dm.get(t) ?? 0) + 1)
+    })
+    adjRef.current = adj; degreeMapRef.current = dm
+
+    // Compute sub-clusters and reset expansion for any new cluster IDs
+    const { map: cMap, list: cList } = computeSubClusters(nodes, adj)
+    clusterMapRef.current = cMap
+    clusterMetaRef.current = cList
+    // Remove stale expanded cluster IDs (clusters that no longer exist)
+    const validIds = new Set(cList.map(c => c.id))
+    setExpandedClusters(prev => {
+      const next = new Set([...prev].filter(id => validIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+
+    // Cache existing positions
     const posCache = new Map<string, { x: number; y: number }>()
     simNodesRef.current.forEach(n => { if (n.x != null) posCache.set(n.id, { x: n.x, y: n.y }) })
 
     const cx = dimsRef.current.w / 2, cy = dimsRef.current.h / 2
     const simNodes: SimNode[] = nodes.map(n => {
       const p = posCache.get(n.id)
-      // Start near group target if no cached position
       const gt = groupTargetsRef.current.get(n.community_id ?? 0)
-      const defaultX = gt ? gt.x + (Math.random() - 0.5) * 60 : cx + (Math.random() - 0.5) * 200
-      const defaultY = gt ? gt.y + (Math.random() - 0.5) * 60 : cy + (Math.random() - 0.5) * 200
-      return { ...n, x: p?.x ?? defaultX, y: p?.y ?? defaultY, vx: 0, vy: 0 } as SimNode
+      const dx = gt ? gt.x + (Math.random() - 0.5) * 60 : cx + (Math.random() - 0.5) * 200
+      const dy = gt ? gt.y + (Math.random() - 0.5) * 60 : cy + (Math.random() - 0.5) * 200
+      return { ...n, x: p?.x ?? dx, y: p?.y ?? dy, vx: 0, vy: 0 } as SimNode
     })
     const simLinks: SimLink[] = edges.map(e => ({
-      source:  typeof e.source === 'string' ? e.source : (e.source as GraphNode).id,
-      target:  typeof e.target === 'string' ? e.target : (e.target as GraphNode).id,
-      weight:  e.weight,
-      forced:  e.forced ?? false,
+      source: typeof e.source === 'string' ? e.source : (e.source as GraphNode).id,
+      target: typeof e.target === 'string' ? e.target : (e.target as GraphNode).id,
+      weight: e.weight, forced: e.forced ?? false,
     }))
 
     simNodesRef.current = simNodes
@@ -546,73 +761,60 @@ export default function GraphCanvas({
     simRef.current?.stop()
 
     const sim = d3.forceSimulation<SimNode>(simNodes)
-      // Repulsion — stronger to give nodes more breathing room
       .force('charge', d3.forceManyBody<SimNode>().strength(-160))
-      // Semantic edges
       .force('link',
         (d3.forceLink<SimNode, SimLink>(simLinks) as d3.ForceLink<SimNode, SimLink>)
           .id(d => d.id)
           .distance(d => {
             const sl = d as SimLink
             const s = sl.source as SimNode, t = sl.target as SimNode
-            const crossGroup = (s?.community_id ?? 0) !== (t?.community_id ?? 0)
-            // Cross-group edges are longer so groups stay separated
-            return crossGroup ? 160 / Math.max(sl.weight, 0.1) : 60 / Math.max(sl.weight, 0.1)
+            const cross = (s?.community_id ?? 0) !== (t?.community_id ?? 0)
+            return cross ? 160 / Math.max(sl.weight, 0.1) : 60 / Math.max(sl.weight, 0.1)
           })
           .strength(d => {
             const sl = d as SimLink
             const s = sl.source as SimNode, t = sl.target as SimNode
-            const crossGroup = (s?.community_id ?? 0) !== (t?.community_id ?? 0)
-            // Cross-group links pull weaker so groups stay cohesive
-            return crossGroup ? Math.min(sl.weight, 1) * 0.3 : Math.min(sl.weight, 1)
+            const cross = (s?.community_id ?? 0) !== (t?.community_id ?? 0)
+            return cross ? Math.min(sl.weight, 1) * 0.3 : Math.min(sl.weight, 1)
           })
       )
-      // Cluster forces — pull same-group nodes toward their group target position
-      .force('cluster-x', d3.forceX<SimNode>(n => {
-        return groupTargetsRef.current.get(n.community_id ?? 0)?.x ?? cx
-      }).strength(0.08))
-      .force('cluster-y', d3.forceY<SimNode>(n => {
-        return groupTargetsRef.current.get(n.community_id ?? 0)?.y ?? cy
-      }).strength(0.08))
-      // Collision to prevent overlap
+      .force('cluster-x', d3.forceX<SimNode>(n => groupTargetsRef.current.get(n.community_id ?? 0)?.x ?? cx).strength(0.08))
+      .force('cluster-y', d3.forceY<SimNode>(n => groupTargetsRef.current.get(n.community_id ?? 0)?.y ?? cy).strength(0.08))
       .force('collide', d3.forceCollide<SimNode>().radius(d => nodeRadius(d.id) + 6).strength(0.8))
-      .alphaDecay(0.02)
-      .velocityDecay(0.4)
+      .alphaDecay(0.02).velocityDecay(0.4)
       .on('tick', render)
 
     simRef.current = sim
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges])
 
-  // Re-render on search / selection changes
   useEffect(() => { render() }, [searchScores, selectedNodeId, render])
 
-  // ── Canvas DPR sizing ─────────────────────────────────────────────────────
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
+    const canvas = canvasRef.current; if (!canvas) return
     const dpr = window.devicePixelRatio || 1
-    canvas.width  = dims.w * dpr
-    canvas.height = dims.h * dpr
+    canvas.width = dims.w * dpr; canvas.height = dims.h * dpr
     render()
   }, [dims, render])
 
-  // ── Centre on best search result ──────────────────────────────────────────
+  // Centre on best search result (never set focusedGroup — search mode is its own visual layer)
   useEffect(() => {
-    if (!searchScores || searchScores.size === 0) return
+    if (!searchScores || searchScores.size === 0) {
+      // Search cleared — re-render so the dim overlay is removed
+      render(); return
+    }
+    // Clear group focus so search scores aren't overridden
+    setFocusedGroup(null)
     const timer = setTimeout(() => {
-      let bestId = '', bestScore = -1
-      searchScores.forEach((sc, id) => { if (sc > bestScore) { bestScore = sc; bestId = id } })
+      let bestId = '', best = -1
+      searchScores.forEach((sc, id) => { if (sc > best) { best = sc; bestId = id } })
       const top = simNodesRef.current.find(n => n.id === bestId)
       if (top?.x != null) {
-        const targetK = Math.max(transformRef.current.k, 2)
+        const targetK = Math.max(transformRef.current.k, 1.5)
         const { w, h } = dimsRef.current
-        // Also focus the group of the best result
-        const bestNode = nodes.find(n => n.id === bestId)
-        if (bestNode?.community_id != null) setFocusedGroup(bestNode.community_id)
         smoothTo(w / 2 - top.x * targetK, h / 2 - top.y * targetK, targetK, 700)
       }
-    }, 800)
+    }, 400)
     return () => clearTimeout(timer)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchScores])
@@ -621,19 +823,16 @@ export default function GraphCanvas({
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return
-    const found = findNodeAt(e.clientX, e.clientY)
-    if (found) {
-      dragNodeRef.current  = found
+    const node = findNodeAt(e.clientX, e.clientY)
+    if (node) {
+      dragNodeRef.current  = node
       dragStartRef.current = { x: e.clientX, y: e.clientY }
       dragMovedRef.current = false
-      found.fx = found.x; found.fy = found.y
+      node.fx = node.x; node.fy = node.y
       setCursor('grabbing')
     } else {
       isPanningRef.current = true
-      panStartRef.current  = {
-        x: e.clientX, y: e.clientY,
-        tx: transformRef.current.x, ty: transformRef.current.y,
-      }
+      panStartRef.current  = { x: e.clientX, y: e.clientY, tx: transformRef.current.x, ty: transformRef.current.y }
       dragStartRef.current = { x: e.clientX, y: e.clientY }
       dragMovedRef.current = false
       setCursor('grabbing')
@@ -660,14 +859,21 @@ export default function GraphCanvas({
       const dx = e.clientX - sx, dy = e.clientY - sy
       if (!dragMovedRef.current && Math.sqrt(dx * dx + dy * dy) > 4) dragMovedRef.current = true
       transformRef.current = { x: tx + dx, y: ty + dy, k: transformRef.current.k }
-      render()
-      return
+      render(); return
     }
-    // Hover
-    const found = findNodeAt(e.clientX, e.clientY)
-    if (found !== hoveredNodeRef.current) {
-      hoveredNodeRef.current = found ?? null
-      setCursor(found ? 'pointer' : 'default')
+    // Hover — check close buttons, collapsed clusters, then nodes
+    const closeBtn = findCollapseButtonAt(e.clientX, e.clientY)
+    if (closeBtn) { setCursor('pointer'); return }
+
+    const cl = findClusterAt(e.clientX, e.clientY)
+    if (cl !== hoveredClusterRef.current) {
+      hoveredClusterRef.current = cl
+      if (cl) { hoveredNodeRef.current = null; setCursor('pointer'); render(); return }
+    }
+    const node = findNodeAt(e.clientX, e.clientY)
+    if (node !== hoveredNodeRef.current) {
+      hoveredNodeRef.current = node ?? null
+      setCursor(node ? 'pointer' : (cl ? 'pointer' : 'default'))
       render()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -686,35 +892,55 @@ export default function GraphCanvas({
     if (node) {
       node.fx = null; node.fy = null
       simRef.current?.alphaTarget(0)
-
       if (!moved) {
-        // Single-click vs double-click detection
         const id = node.id
-        if (lastClickNodeIdRef.current === id && clickTimerRef.current !== null) {
+        if (lastClickRef.current === id && clickTimerRef.current !== null) {
           clearTimeout(clickTimerRef.current)
-          clickTimerRef.current = null
-          lastClickNodeIdRef.current = null
-          openFile(node.path)
-          return
+          clickTimerRef.current = null; lastClickRef.current = null
+          openFile(node.path); return
         }
-        lastClickNodeIdRef.current = id
+        lastClickRef.current = id
         clickTimerRef.current = setTimeout(() => {
-          clickTimerRef.current      = null
-          lastClickNodeIdRef.current = null
-
-          // Open inspector + focus this node's group
-          setFocusedNodeId(id)
-          setFocusedGroup(null)   // node focus overrides group focus
+          clickTimerRef.current = null; lastClickRef.current = null
+          // Open inspector; only focus group when NOT in search mode
           onNodeClickRef.current(node)
-
+          if (!searchScoresRef.current) setFocusedGroup(node.community_id ?? null)
           const { w, h } = dimsRef.current
           const { k }    = transformRef.current
-          smoothTo(w / 2 - node.x * k, h / 2 - node.y * k, k, 600)
+          smoothTo(w / 2 - node.x * k, h / 2 - node.y * k, k, 500)
         }, 280)
       }
     } else if (!moved) {
-      // Click on empty space → clear all focus
-      setFocusedNodeId(null)
+      // Check close button (collapse expanded cluster) first
+      const closeTarget = findCollapseButtonAt(e.clientX, e.clientY)
+      if (closeTarget) {
+        setExpandedClusters(prev => { const n = new Set(prev); n.delete(closeTarget); return n })
+        return
+      }
+
+      // Check for collapsed cluster click → expand with burst animation
+      const cl = findClusterAt(e.clientX, e.clientY)
+      if (cl) {
+        // Pin member nodes at cluster centroid so they burst outward naturally
+        const metrics = clusterMetricsRef.current.get(cl)
+        const meta    = clusterMetaRef.current.find(m => m.id === cl)
+        if (metrics && meta) {
+          meta.nodeIds.forEach(nodeId => {
+            const sn = simNodesRef.current.find(n => n.id === nodeId)
+            if (sn) {
+              sn.x = metrics.cx + (Math.random() - 0.5) * 4
+              sn.y = metrics.cy + (Math.random() - 0.5) * 4
+              sn.vx = (Math.random() - 0.5) * 3
+              sn.vy = (Math.random() - 0.5) * 3
+            }
+          })
+          simRef.current?.alpha(0.5).restart()
+        }
+        setExpandedClusters(prev => { const n = new Set(prev); n.add(cl); return n })
+        return
+      }
+
+      // Click on empty space → clear group focus
       setFocusedGroup(null)
       render()
     }
@@ -725,30 +951,25 @@ export default function GraphCanvas({
     isPanningRef.current   = false
     dragNodeRef.current    = null
     hoveredNodeRef.current = null
-    setCursor('default')
-    render()
+    hoveredClusterRef.current = null
+    setCursor('default'); render()
   }, [render])
 
   const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    const canvas = canvasRef.current!
-    const rect   = canvas.getBoundingClientRect()
+    const rect = canvasRef.current!.getBoundingClientRect()
     const mx = e.clientX - rect.left, my = e.clientY - rect.top
     const { k, x: tx, y: ty } = transformRef.current
     const factor = Math.exp(-e.deltaY * 0.001)
-    const newK   = Math.min(12, Math.max(0.05, k * factor))
-    transformRef.current = {
-      x: mx - (mx - tx) * (newK / k),
-      y: my - (my - ty) * (newK / k),
-      k: newK,
-    }
+    const newK = Math.min(12, Math.max(0.05, k * factor))
+    transformRef.current = { x: mx - (mx - tx) * (newK / k), y: my - (my - ty) * (newK / k), k: newK }
     render()
   }, [render])
 
   const handleContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    const found = findNodeAt(e.clientX, e.clientY)
-    if (found) setCtxMenu({ x: e.clientX, y: e.clientY, node: found })
+    const node = findNodeAt(e.clientX, e.clientY)
+    if (node) setCtxMenu({ x: e.clientX, y: e.clientY, node })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -757,29 +978,19 @@ export default function GraphCanvas({
     if (!activeWorkspaceId) return
     try {
       await api.deleteFile(node.path, activeWorkspaceId)
-      if (focusedNodeIdRef.current === node.id) setFocusedNodeId(null)
       onNodeDeletedRef.current?.()
     } catch {}
   }
 
-  // Focused node's group label for breadcrumb
-  const focusedGroupLabel = useMemo(() => {
-    const gid = focusedGroup ?? (
-      focusedNodeId
-        ? (simNodesRef.current.find(n => n.id === focusedNodeId)?.community_id ?? null)
-        : null
-    )
-    if (gid === null) return null
-    return groupList.find(g => g.id === gid)?.label ?? null
-  }, [focusedGroup, focusedNodeId, groupList])
+  function collapseCluster(clusterId: string) {
+    setExpandedClusters(prev => { const n = new Set(prev); n.delete(clusterId); return n })
+  }
 
-  const activeFocusGroupId = useMemo(() => {
-    if (focusedGroup !== null) return focusedGroup
-    if (focusedNodeId) {
-      return simNodesRef.current.find(n => n.id === focusedNodeId)?.community_id ?? null
-    }
-    return null
-  }, [focusedGroup, focusedNodeId])
+  // Focused group label for breadcrumb
+  const focusedGroupLabel = useMemo(
+    () => groupList.find(g => g.id === focusedGroup)?.label ?? null,
+    [focusedGroup, groupList],
+  )
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -796,18 +1007,15 @@ export default function GraphCanvas({
         onContextMenu={handleContextMenu}
       />
 
-      {/* Focus breadcrumb — visible when a group is active */}
-      {focusedGroupLabel && (
+      {/* Group focus breadcrumb */}
+      {focusedGroupLabel && focusedGroup !== null && (
         <div className="absolute top-4 left-4 z-20 select-none animate-fade-in">
           <div className="bg-black/70 backdrop-blur-md border border-white/10 rounded-xl px-3.5 py-2 shadow-2xl flex items-center gap-2">
-            <div
-              className="w-2 h-2 rounded-full flex-shrink-0"
-              style={{ backgroundColor: activeFocusGroupId !== null ? communityColor(activeFocusGroupId) : '#fff' }}
-            />
+            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: communityColor(focusedGroup) }} />
             <span className="text-white/80 text-sm font-medium">{focusedGroupLabel}</span>
             <button
               className="ml-2 text-white/30 hover:text-white/70 text-xs transition-colors"
-              onClick={() => { setFocusedGroup(null); setFocusedNodeId(null); render() }}
+              onClick={() => { setFocusedGroup(null); render() }}
             >
               ✕
             </button>
@@ -815,81 +1023,67 @@ export default function GraphCanvas({
         </div>
       )}
 
-      {/* Depth slider — only while a specific node is focused */}
-      {focusedNodeId && (
-        <div className="absolute top-4 right-4 z-20 select-none animate-fade-in">
-          <div className="bg-black/70 backdrop-blur-md border border-white/10 rounded-xl px-4 py-3 shadow-2xl flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-[11px] text-white/50 uppercase tracking-wide font-semibold">Depth</span>
-              <button
-                className="text-[10px] text-white/30 hover:text-white/60 transition-colors"
-                onClick={() => { setFocusedNodeId(null); render() }}
-              >
-                ✕ clear
-              </button>
-            </div>
-            <div className="flex items-center gap-1">
-              {([1, 2, 3] as const).map(d => (
-                <button
-                  key={d}
-                  className={`w-8 h-8 rounded-lg text-sm font-bold transition-all ${
-                    localDepth === d
-                      ? 'bg-white/20 text-white'
-                      : 'text-white/40 hover:text-white/70 hover:bg-white/10'
-                  }`}
-                  onClick={() => setLocalDepth(d)}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Group legend */}
       <CommunityLegend
         groups={groupList}
-        focusedGroup={activeFocusGroupId}
-        onGroupClick={handleLegendClick}
+        focusedGroup={focusedGroup}
+        onGroupClick={id => {
+          if (id === null) { setFocusedGroup(null); render() }
+          else focusGroupAndPan(id)
+        }}
       />
 
       {/* Context menu */}
-      {ctxMenu && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setCtxMenu(null)} />
-          <div
-            className="fixed z-50 bg-bina-surface border border-bina-border rounded-xl shadow-2xl py-1.5 min-w-[180px] overflow-hidden animate-fade-in"
-            style={{ left: ctxMenu.x, top: ctxMenu.y }}
-          >
-            <div className="px-3 py-1.5 border-b border-bina-border/50 mb-1">
-              <p className="text-bina-text text-xs font-medium truncate max-w-[160px]">
-                {ctxMenu.node.name || ctxMenu.node.label}
-              </p>
-              <p className="text-bina-muted text-[10px]">{ctxMenu.node.doc_type}</p>
+      {ctxMenu && (() => {
+        const nodeClusterId = clusterMapRef.current.get(ctxMenu.node.id)
+        const canCollapse   = nodeClusterId != null && expandedClusters.has(nodeClusterId)
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setCtxMenu(null)} />
+            <div
+              className="fixed z-50 bg-bina-surface border border-bina-border rounded-xl shadow-2xl py-1.5 min-w-[180px] overflow-hidden animate-fade-in"
+              style={{ left: ctxMenu.x, top: ctxMenu.y }}
+            >
+              <div className="px-3 py-1.5 border-b border-bina-border/50 mb-1">
+                <p className="text-bina-text text-xs font-medium truncate max-w-[160px]">
+                  {ctxMenu.node.name || ctxMenu.node.label}
+                </p>
+                <p className="text-bina-muted text-[10px]">{ctxMenu.node.doc_type}</p>
+              </div>
+              <button
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-border/40 transition-colors text-left"
+                onClick={() => { setCtxMenu(null); openFile(ctxMenu.node.path) }}
+              >
+                Open file
+              </button>
+              <button
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-border/40 transition-colors text-left"
+                onClick={() => { setCtxMenu(null); showInFinder(ctxMenu.node.path) }}
+              >
+                Show in Finder
+              </button>
+              {canCollapse && (
+                <>
+                  <div className="h-px bg-bina-border/50 my-1" />
+                  <button
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-white/60 hover:bg-bina-border/40 transition-colors text-left"
+                    onClick={() => { collapseCluster(nodeClusterId!); setCtxMenu(null) }}
+                  >
+                    Collapse sub-group
+                  </button>
+                </>
+              )}
+              <div className="h-px bg-bina-border/50 my-1" />
+              <button
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors text-left"
+                onClick={() => handleRemoveFromBina(ctxMenu.node)}
+              >
+                Remove from Bina
+              </button>
             </div>
-            <button
-              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-border/40 transition-colors text-left"
-              onClick={() => { setCtxMenu(null); openFile(ctxMenu.node.path) }}
-            >
-              Open file
-            </button>
-            <button
-              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-border/40 transition-colors text-left"
-              onClick={() => { setCtxMenu(null); showInFinder(ctxMenu.node.path) }}
-            >
-              Show in Finder
-            </button>
-            <div className="h-px bg-bina-border/50 my-1" />
-            <button
-              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors text-left"
-              onClick={() => handleRemoveFromBina(ctxMenu.node)}
-            >
-              Remove from Bina
-            </button>
-          </div>
-        </>
-      )}
+          </>
+        )
+      })()}
     </div>
   )
 }
