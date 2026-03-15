@@ -1,33 +1,91 @@
-# Python
+# ── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
-.venv/
-venv/
-env/
+*.pyd
+.Python
 *.egg-info/
 dist/
 build/
+*.spec.pyc
 
-# Bina runtime data (local only)
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ── Bina runtime data (never commit — user-specific, can be large) ───────────
 .bina/
 *.db
 *.sqlite
+*.sqlite3
 
-# Node / Electron
+# ── PyInstaller build artifacts ──────────────────────────────────────────────
+build/
+*.spec
+# But keep bina_api.spec (intentional build config)
+!bina_api.spec
+dist/
+
+# ── Node / Electron ──────────────────────────────────────────────────────────
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/out/
 
-# macOS
+# Electron build artifacts
+frontend/resources/bina-api/
+*.dmg
+*.pkg
+*.exe
+*.AppImage
+
+# ── macOS ────────────────────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 .AppleDouble
 .LSOverride
+Icon
 
-# Logs
+# Thumbnails
+ehthumbs.db
+Thumbs.db
+
+# ── Logs ────────────────────────────────────────────────────────────────────
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
 
-# Env
+# ── Environment & Secrets ─────────────────────────────────────────────────
 .env
+.env.*
 .env.local
+.env.*.local
+!.env.example
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Cursor AI ────────────────────────────────────────────────────────────────
+.claude/
+# Keep .cursor/rules/ (project conventions)
+.cursor/projects/
+
+# ── Temporary files ──────────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# ── Type stubs ───────────────────────────────────────────────────────────────
+*.pyi

@@ -68,6 +68,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
+    title: 'Bina',
     titleBarStyle: 'hiddenInset',
     vibrancy: 'sidebar',
     backgroundColor: '#0d0d0f',
@@ -79,6 +80,9 @@ function createWindow() {
     },
     show: false,
   })
+
+  // Prevent the web page from overriding the window title
+  mainWindow.on('page-title-updated', (e) => e.preventDefault())
 
   if (IS_DEV) {
     mainWindow.loadURL('http://localhost:5173')
