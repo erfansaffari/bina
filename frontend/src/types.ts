@@ -11,7 +11,8 @@ export interface GraphNode {
   score: number
   relevance_score: number
   from_graph: boolean
-  community_id: number  // Louvain partition ID → maps to COMMUNITY_PALETTE
+  community_id: number         // structural group ID → maps to COMMUNITY_PALETTE
+  community_label?: string     // "Lectures", "Assignments", etc.
   // Injected by D3 simulation at runtime
   x?: number
   y?: number
@@ -31,6 +32,29 @@ export interface GraphEdge {
 export interface GraphData {
   nodes: GraphNode[]
   edges: GraphEdge[]
+}
+
+export interface GroupNode {
+  id: number
+  label: string
+  count: number
+  x?: number
+  y?: number
+  vx?: number
+  vy?: number
+  fx?: number | null
+  fy?: number | null
+}
+
+export interface GroupEdge {
+  source: number | GroupNode
+  target: number | GroupNode
+  weight: number
+}
+
+export interface GroupGraphData {
+  groups: GroupNode[]
+  edges: GroupEdge[]
 }
 
 export interface SearchResult {

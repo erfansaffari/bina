@@ -7,6 +7,7 @@ import type {
   ProgressData,
   SearchResult,
   GraphData,
+  GroupGraphData,
   Workspace,
   WorkspaceFolder,
   QueryResult,
@@ -76,6 +77,9 @@ export const api = {
 
   graph: (workspaceId: string) =>
     apiGet<GraphData>(`/graph?workspace_id=${workspaceId}`),
+
+  graphGroups: (workspaceId: string) =>
+    apiGet<GroupGraphData>(`/graph/groups?workspace_id=${workspaceId}`),
 
   search: (query: string, workspaceId: string, limit = 20) =>
     post<SearchResult>('/search', { query, workspace_id: workspaceId, limit }),

@@ -6,7 +6,8 @@ ChromaDB and creates a weighted undirected graph where:
 
   - Nodes: one per file (node ID = MD5 hash)
     Attributes: path, summary, keywords, entities, doc_type, status,
-                community_id (Louvain partition integer)
+                community_id (structural group integer),
+                community_label (human-readable group name)
 
   - Edges: cosine similarity ≥ SIMILARITY_THRESHOLD
     Weight = cosine_similarity + ENTITY_BOOST per shared entity value
@@ -18,7 +19,9 @@ mark_dirty(workspace_id) is called.
 """
 from __future__ import annotations
 
+import re
 import threading
+from pathlib import Path
 from typing import Dict, Set
 
 import numpy as np
@@ -27,12 +30,6 @@ import networkx as nx
 import store
 import vector_store_router
 from config import ENTITY_BOOST, MAX_GRAPH_NEIGHBOURS, SIMILARITY_THRESHOLD
-
-try:
-    import community as community_louvain
-    _LOUVAIN_AVAILABLE = True
-except ImportError:
-    _LOUVAIN_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Per-workspace graph cache
@@ -67,10 +64,10 @@ def mark_all_dirty() -> None:
 def remove_node_from_graph(workspace_id: str, file_hash: str) -> None:
     """Surgically remove one node without a full rebuild.
 
-    Removes the node and all its edges in-place, then re-runs Louvain
-    community detection on the surviving graph so community_id values stay
-    accurate.  Does NOT mark the workspace dirty — callers that need a full
-    rebuild should call mark_dirty() explicitly.
+    Removes the node and all its edges in-place, then re-runs structural
+    group assignment on the surviving graph so community_id/community_label
+    values stay accurate.  Does NOT mark the workspace dirty — callers that
+    need a full rebuild should call mark_dirty() explicitly.
     """
     with _lock:
         if workspace_id not in _graphs:
@@ -80,20 +77,17 @@ def remove_node_from_graph(workspace_id: str, file_hash: str) -> None:
             return
         G.remove_node(file_hash)  # also removes all incident edges
 
-        # Re-run community detection on the trimmed graph
-        if _LOUVAIN_AVAILABLE and G.number_of_edges() > 0:
-            try:
-                partition = community_louvain.best_partition(G, weight="weight")
-            except Exception:
-                partition = {n: 0 for n in G.nodes}
-        else:
-            partition = {}
-            for comp_id, component in enumerate(nx.connected_components(G)):
-                for node_hash in component:
-                    partition[node_hash] = comp_id
-
-        for n, cid in partition.items():
-            G.nodes[n]["community_id"] = cid
+        # Re-run structural group assignment on the trimmed graph
+        group_labels: dict[str, str] = {}
+        for h in G.nodes:
+            group_labels[h] = _assign_structural_group(
+                G.nodes[h].get("path", ""), G.nodes[h].get("doc_type", "Other"),
+            )
+        unique_groups = sorted(set(group_labels.values())) if group_labels else []
+        group_to_id = {g: i for i, g in enumerate(unique_groups)}
+        for h in G.nodes:
+            G.nodes[h]["community_id"] = group_to_id.get(group_labels[h], 0)
+            G.nodes[h]["community_label"] = group_labels[h]
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +111,34 @@ def _shared_entity_count(entities_a: dict, entities_b: dict) -> int:
         set_b = {v.lower().strip() for v in entities_b.get(key, [])}
         count += len(set_a & set_b)
     return count
+
+
+def _assign_structural_group(path: str, doc_type: str) -> str:
+    """Assign a human-readable structural group label from folder name + doc_type."""
+    folder = Path(path).parent.name.lower() if path else ""
+    dt = (doc_type or "").lower()
+
+    # Folder-based patterns (strongest signal)
+    if re.match(r'^a\d+$', folder):                       return "Assignments"
+    if folder in ("lectures", "lecture"):                  return "Lectures"
+    if folder in ("labs", "lab"):                          return "Labs"
+    if folder in ("exams", "exam", "tests", "test"):       return "Exams"
+    if folder in ("tutorials", "tutorial"):                return "Tutorials"
+    if folder in ("notes", "note"):                        return "Notes"
+    if re.match(r'^(problem.?set|ps|hw)\d*$', folder):    return "Problem Sets"
+
+    # doc_type fallback
+    if "assignment" in dt:                                  return "Assignments"
+    if "lecture" in dt:                                     return "Lectures"
+    if any(k in dt for k in ("exam", "review", "midterm", "final")): return "Exams"
+    if "lab" in dt:                                         return "Labs"
+    if "tutorial" in dt:                                    return "Tutorials"
+
+    # Use doc_type directly if it's meaningful
+    if doc_type and doc_type not in ("Other", "other"):    return doc_type
+    # Use folder name
+    if folder and folder not in (".", ""):                  return folder.title()
+    return "Other"
 
 
 def _build_graph_locked(workspace_id: str) -> nx.Graph:
@@ -226,21 +248,19 @@ def _build_graph_locked(workspace_id: str) -> nx.Graph:
                        weight=float(best_sim), similarity=float(best_sim),
                        shared_entities=0, forced=True)
 
-    # ── Community detection (Louvain) ─────────────────────────────────────────
-    if _LOUVAIN_AVAILABLE and G.number_of_edges() > 0:
-        try:
-            partition = community_louvain.best_partition(G, weight="weight")
-        except Exception:
-            partition = {n: 0 for n in G.nodes}
-    else:
-        # Fallback: assign each connected component its own community
-        partition = {}
-        for comp_id, component in enumerate(nx.connected_components(G)):
-            for node_hash in component:
-                partition[node_hash] = comp_id
+    # ── Structural group assignment ──────────────────────────────────────────
+    group_labels: dict[str, str] = {}
+    for h in G.nodes:
+        group_labels[h] = _assign_structural_group(
+            G.nodes[h].get("path", ""), G.nodes[h].get("doc_type", "Other"),
+        )
 
-    for node_hash, comm_id in partition.items():
-        G.nodes[node_hash]["community_id"] = comm_id
+    unique_groups = sorted(set(group_labels.values()))
+    group_to_id = {g: i for i, g in enumerate(unique_groups)}
+
+    for h in G.nodes:
+        G.nodes[h]["community_id"] = group_to_id[group_labels[h]]
+        G.nodes[h]["community_label"] = group_labels[h]
 
     return G
 

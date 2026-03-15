@@ -299,6 +299,7 @@ def _graph_to_json(G, workspace_id: str) -> dict:
         if rec:
             n = _node_from_record(rec)
             n["community_id"] = G.nodes[node_hash].get("community_id", 0)
+            n["community_label"] = G.nodes[node_hash].get("community_label", "Other")
             nodes.append(n)
     for u, v, data in G.edges(data=True):
         edges.append({
@@ -507,6 +508,41 @@ def full_graph(workspace_id: str | None = None):
         return {"nodes": [], "edges": []}
     G = get_graph(workspace_id)
     return _graph_to_json(G, workspace_id)
+
+
+@app.get("/graph/groups")
+def graph_groups(workspace_id: str | None = None):
+    """Collapsed group-level graph data for the overview zoom level."""
+    if not workspace_id:
+        return {"groups": [], "edges": []}
+    G = get_graph(workspace_id)
+
+    groups: dict[int, dict] = {}
+    for h in G.nodes:
+        label = G.nodes[h].get("community_label", "Other")
+        cid = G.nodes[h].get("community_id", 0)
+        if cid not in groups:
+            groups[cid] = {"label": label, "count": 0}
+        groups[cid]["count"] += 1
+
+    group_edges: dict[tuple[int, int], int] = {}
+    for u, v, _data in G.edges(data=True):
+        cid_u = G.nodes[u].get("community_id", 0)
+        cid_v = G.nodes[v].get("community_id", 0)
+        if cid_u != cid_v:
+            key = (min(cid_u, cid_v), max(cid_u, cid_v))
+            group_edges[key] = group_edges.get(key, 0) + 1
+
+    return {
+        "groups": [
+            {"id": k, "label": v["label"], "count": v["count"]}
+            for k, v in groups.items()
+        ],
+        "edges": [
+            {"source": k[0], "target": k[1], "weight": v}
+            for k, v in group_edges.items()
+        ],
+    }
 
 
 @app.post("/watch")
