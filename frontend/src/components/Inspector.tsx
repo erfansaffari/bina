@@ -10,6 +10,8 @@ const TYPE_COLORS: Record<string, string> = {
   'Meeting Notes':           'bg-bina-purple/20 text-bina-purple',
   'Invoice':                 'bg-orange-400/20 text-orange-400',
   'Report':                  'bg-teal-400/20 text-teal-400',
+  'Image':                   'bg-pink-500/20 text-pink-400',
+  'Photograph':              'bg-pink-500/20 text-pink-400',
   'Other':                   'bg-bina-muted/20 text-bina-muted',
 }
 
@@ -67,6 +69,19 @@ export default function Inspector({ node, open, onClose }: Props) {
             </span>
           )}
         </div>
+
+        {/* Image thumbnail (for image files) */}
+        {path && /\.(png|jpg|jpeg|webp|gif)$/i.test(path) && (
+          <div>
+            <p className="text-xs font-medium text-bina-muted uppercase tracking-wider mb-2">Preview</p>
+            <img
+              src={`file://${path}`}
+              alt={node.label}
+              className="w-full rounded-xl object-cover max-h-48 border border-bina-border"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+            />
+          </div>
+        )}
 
         {/* Summary */}
         {summary ? (

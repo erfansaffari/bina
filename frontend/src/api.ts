@@ -9,6 +9,9 @@ import type {
   GraphData,
   Workspace,
   WorkspaceFolder,
+  QueryResult,
+  WorkspaceModelConfig,
+  AppSettingsResponse,
 } from './types'
 
 const BASE = 'http://127.0.0.1:8765'
@@ -96,9 +99,12 @@ export const api = {
     apiGet<{
       total_files_indexed: number
       total_workspaces: number
-      chroma_count: number
+      vector_count: number
       dedup_savings: number
     }>('/global/status'),
+
+  query: (query: string, workspaceId: string, mode: 'agent' | 'search' = 'agent') =>
+    post<QueryResult>('/query', { query, workspace_id: workspaceId, mode }),
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +114,26 @@ export const api = {
 export const workspacesApi = {
   list: () => apiGet<Workspace[]>('/workspaces'),
 
-  create: (name: string, emoji = '📁', colour = '#4F46E5') =>
-    post<Workspace>('/workspaces', { name, emoji, colour }),
+  create: (
+    name: string,
+    emoji = '📁',
+    colour = '#4F46E5',
+    processingPath = 'hosted',
+    modelName?: string,
+    userApiKey?: string,
+    userApiBase?: string,
+    vectorBackend = 'moorcheh',
+  ) =>
+    post<Workspace>('/workspaces', {
+      name,
+      emoji,
+      colour,
+      processing_path: processingPath,
+      model_name: modelName,
+      user_api_key: userApiKey,
+      user_api_base: userApiBase,
+      vector_backend: vectorBackend,
+    }),
 
   update: (id: string, fields: Partial<Pick<Workspace, 'name' | 'emoji' | 'colour'>>) =>
     patch<Workspace>(`/workspaces/${id}`, fields),
@@ -125,6 +149,13 @@ export const workspacesApi = {
 
   removeFolder: (id: string, path: string) =>
     del<{ stopped: boolean; files_purged: number }>(`/workspaces/${id}/folders`, { path }),
+
+  // v3 model configuration
+  getModel: (id: string) =>
+    apiGet<WorkspaceModelConfig>(`/workspaces/${id}/model`),
+
+  updateModel: (id: string, config: Partial<WorkspaceModelConfig>) =>
+    patch<WorkspaceModelConfig>(`/workspaces/${id}/model`, config),
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +202,18 @@ export const modelsApi = {
     ),
 }
 
+
+
+// ---------------------------------------------------------------------------
+// App Settings API (global — not workspace-scoped)
+// ---------------------------------------------------------------------------
+
+export const appSettingsApi = {
+  get: () => apiGet<AppSettingsResponse>('/settings/app'),
+
+  save: (settings: { moorcheh_api_key?: string }) =>
+    post<{ saved: boolean }>('/settings/app', settings),
+}
 
 
 // ---------------------------------------------------------------------------

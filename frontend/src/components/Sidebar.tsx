@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Lock, Database, GitBranch, FolderOpen, AlertCircle, Plus, X, Settings, RotateCcw } from 'lucide-react'
+import { Database, GitBranch, FolderOpen, AlertCircle, Plus, X, Settings, RotateCcw } from 'lucide-react'
 import { workspacesApi, openFolder, api } from '../api'
 import { useAppStore } from '../store/appStore'
-import SettingsModal from './SettingsModal'
 import type { StatusData, ProgressData, WorkspaceFolder } from '../types'
 
 interface Props {
@@ -13,13 +12,12 @@ interface Props {
 }
 
 export default function Sidebar({ status, progress, onNeedOnboarding, onGraphReload }: Props) {
-  const { activeWorkspaceId, workspaces, loadWorkspaces } = useAppStore()
+  const { activeWorkspaceId, workspaces, loadWorkspaces, setGlobalSettingsOpen } = useAppStore()
   const isIndexing = progress?.running ?? false
 
   const [folders, setFolders] = useState<WorkspaceFolder[]>([])
   const [addingFolder, setAddingFolder] = useState(false)
   const [reindexing, setReindexing] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId)
 
@@ -126,12 +124,22 @@ export default function Sidebar({ status, progress, onNeedOnboarding, onGraphRel
           { icon: AlertCircle, label: 'Unreadable',        value: status?.failed ?? 0,      color: 'text-bina-muted', hide: !status?.failed },
         ].map(({ icon: Icon, label, value, color, hide }) =>
           hide ? null : (
-            <div key={label} className="flex items-center gap-3 px-2 py-2 rounded-xl hover:bg-bina-border/30 transition-colors">
-              <Icon className={`w-4 h-4 ${color} flex-shrink-0`} />
-              <div className="flex-1 min-w-0">
-                <p className="text-bina-muted text-xs">{label}</p>
-                <p className="text-bina-text font-mono text-sm font-medium">{value.toLocaleString()}</p>
+            <div key={label} className="px-2 py-2 rounded-xl hover:bg-bina-border/30 transition-colors">
+              <div className="flex items-center gap-3">
+                <Icon className={`w-4 h-4 ${color} flex-shrink-0`} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-bina-muted text-xs">{label}</p>
+                  <p className="text-bina-text font-mono text-sm font-medium">{value.toLocaleString()}</p>
+                </div>
               </div>
+              {label === 'Unreadable' && status?.failed_reasons?.[0] && (
+                <p
+                  className="text-[10px] text-red-400/70 leading-tight ml-7 mt-0.5 truncate"
+                  title={status.failed_reasons[0]}
+                >
+                  {status.failed_reasons[0].slice(0, 80)}
+                </p>
+              )}
             </div>
           )
         )}
@@ -194,28 +202,16 @@ export default function Sidebar({ status, progress, onNeedOnboarding, onGraphRel
         </div>
       </div>
 
-      {/* Privacy badge + Settings */}
-      <div className="px-4 py-4 border-t border-bina-border space-y-2">
-        <div className="flex items-center gap-2.5 px-3 py-2.5 bg-bina-green/5 border border-bina-green/15 rounded-xl">
-          <Lock className="w-3.5 h-3.5 text-bina-green flex-shrink-0" />
-          <p className="text-bina-green/80 text-xs leading-tight">
-            All AI runs on your Mac. Nothing is sent anywhere.
-          </p>
-        </div>
+      {/* Settings */}
+      <div className="px-4 py-4 border-t border-bina-border">
         <button
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => setGlobalSettingsOpen(true)}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-bina-muted hover:text-bina-text hover:bg-bina-border/40 transition-colors text-xs"
         >
           <Settings className="w-3.5 h-3.5" />
           Settings
         </button>
       </div>
-
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onIndexCleared={() => { loadWorkspaces(); onGraphReload() }}
-      />
     </div>
   )
 }

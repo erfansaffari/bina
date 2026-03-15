@@ -3,8 +3,8 @@ Semantic search engine + interactive REPL.
 
 Flow
 ----
-1. Embed the query string with nomic-embed-text  (<100ms)
-2. ChromaDB returns top-20 most similar document chunks
+1. Embed the query string (via inference.embed_text)
+2. Vector store returns top-20 most similar documents
 3. NetworkX expands each result to its 1st-degree neighbours
 4. Results are de-duplicated and ranked by combined score
 5. Rich table printed to terminal
@@ -16,15 +16,15 @@ import subprocess
 from pathlib import Path
 
 import networkx as nx
-import ollama
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
 import store
-import vector_store
-from config import EMBED_MODEL, MAX_GRAPH_NEIGHBOURS
+import vector_store_router
+from inference import embed_text
+from config import MAX_GRAPH_NEIGHBOURS
 from graph import get_neighbours
 
 console = Console()
@@ -34,9 +34,8 @@ console = Console()
 # Core search
 # ---------------------------------------------------------------------------
 
-def _embed_query(query: str) -> list[float]:
-    response = ollama.embeddings(model=EMBED_MODEL, prompt=query)
-    return response["embedding"]
+def _embed_query(query: str, workspace=None) -> list[float]:
+    return embed_text(query, workspace=workspace)
 
 
 def _format_score(score: float) -> str:
@@ -52,20 +51,33 @@ def search(
     G: nx.Graph,
     n_results: int = 20,
     workspace_hashes: list[str] | None = None,
+    workspace_id: str | None = None,
 ) -> list[dict]:
     """
     Perform semantic search and graph expansion.
 
     workspace_hashes: if provided, only documents with these hashes are
     considered (workspace-scoped search).
+    workspace_id: used to select the right vector store and workspace config.
 
     Returns a ranked list of result dicts:
         rank, hash, path, filename, doc_type, summary, score, from_graph
     """
-    embedding = _embed_query(query)
-    raw_results = vector_store.query(
-        embedding, n_results=n_results, hashes=workspace_hashes
-    )
+    workspace = store.get_workspace(workspace_id) if workspace_id else None
+    embedding = _embed_query(query, workspace=workspace)
+    vstore = vector_store_router.get_store(workspace_id)
+    try:
+        raw_results = vstore.query(
+            embedding, n_results=n_results, hashes=workspace_hashes
+        )
+    except Exception as _qe:
+        # Primary store query failed (e.g. Moorcheh auth error) — fall back to ChromaDB
+        import logging as _log
+        _log.getLogger(__name__).warning(f"Primary vector store query failed, using ChromaDB: {_qe}")
+        import vector_store_local as _local_vs
+        raw_results = _local_vs.query(
+            embedding, n_results=n_results, hashes=workspace_hashes
+        )
 
     if not raw_results:
         return []
@@ -199,7 +211,7 @@ def repl() -> None:
         Panel(
             f"[bold cyan]Bina[/bold cyan] — semantic search\n"
             f"[dim]{ok} files analysed · {total - ok} pending/failed · "
-            f"{vector_store.count()} vectors in index[/dim]\n\n"
+            f"{vector_store_router.get_store().count()} vectors in index[/dim]\n\n"
             f"[dim]Type a question, [bold]open <n>[/bold] to open a result, "
             f"[bold]q[/bold] to quit.[/dim]",
             border_style="cyan",

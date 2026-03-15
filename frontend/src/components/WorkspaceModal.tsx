@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { X, Trash2 } from 'lucide-react'
+import { X, Trash2, ChevronDown } from 'lucide-react'
 import { workspacesApi, confirmDialog } from '../api'
 import { useAppStore } from '../store/appStore'
 import type { Workspace } from '../types'
@@ -32,6 +32,17 @@ export default function WorkspaceModal({ open, editWorkspace, onClose, onCreated
   const [deleting, setDeleting] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
 
+  // AI Settings state (edit mode only)
+  const [aiOpen, setAiOpen] = useState(false)
+  const [processingPath, setProcessingPath] = useState<'hosted' | 'local' | 'user_api'>('hosted')
+  const [originalPath, setOriginalPath] = useState<'hosted' | 'local' | 'user_api'>('hosted')
+  const [modelName, setModelName] = useState('')
+  const [userApiKey, setUserApiKey] = useState('')
+  const [userApiBase, setUserApiBase] = useState('')
+  const [vectorBackend, setVectorBackend] = useState<'moorcheh' | 'chromadb'>('moorcheh')
+  const [savingModel, setSavingModel] = useState(false)
+  const [modelSavedOk, setModelSavedOk] = useState(false)
+
   const isEditing = Boolean(editWorkspace)
 
   useEffect(() => {
@@ -45,10 +56,26 @@ export default function WorkspaceModal({ open, editWorkspace, onClose, onCreated
         setEmoji('📁')
         setColour('#4F46E5')
       }
+      setAiOpen(false)
+      setModelSavedOk(false)
       // Autofocus name input
       setTimeout(() => nameRef.current?.focus(), 50)
     }
   }, [open, editWorkspace])
+
+  // Fetch AI config when opening in edit mode
+  useEffect(() => {
+    if (!open || !isEditing || !editWorkspace?.id) return
+    workspacesApi.getModel(editWorkspace.id).then(config => {
+      const path = (config.processing_path as 'hosted' | 'local' | 'user_api') || 'hosted'
+      setProcessingPath(path)
+      setOriginalPath(path)
+      setModelName(config.model_name || '')
+      setUserApiKey(config.has_user_api_key ? '••••••••' : '')
+      setUserApiBase('')
+      setVectorBackend((config.vector_backend as 'moorcheh' | 'chromadb') || 'moorcheh')
+    }).catch(() => {})
+  }, [open, isEditing, editWorkspace?.id])
 
   async function handleSubmit() {
     if (!name.trim()) return
@@ -59,7 +86,14 @@ export default function WorkspaceModal({ open, editWorkspace, onClose, onCreated
         await loadWorkspaces()
         onClose()
       } else {
-        const ws = await workspacesApi.create(name.trim(), emoji, colour)
+        const ws = await workspacesApi.create(
+          name.trim(), emoji, colour,
+          processingPath,
+          modelName || undefined,
+          userApiKey && !userApiKey.includes('•') ? userApiKey : undefined,
+          userApiBase || undefined,
+          vectorBackend,
+        )
         await loadWorkspaces()
         setActiveWorkspace(ws.id)
         onCreated?.(ws)
@@ -99,6 +133,27 @@ export default function WorkspaceModal({ open, editWorkspace, onClose, onCreated
     }
   }
 
+  async function saveModelConfig() {
+    if (!editWorkspace?.id) return
+    setSavingModel(true)
+    try {
+      await workspacesApi.updateModel(editWorkspace.id, {
+        processing_path: processingPath,
+        model_name: modelName || undefined,
+        user_api_key: userApiKey && !userApiKey.includes('•') ? userApiKey : undefined,
+        user_api_base: userApiBase || undefined,
+        vector_backend: vectorBackend,
+      })
+      setOriginalPath(processingPath)
+      setModelSavedOk(true)
+      setTimeout(() => setModelSavedOk(false), 2000)
+    } catch (err) {
+      console.error('Failed to save AI settings', err)
+    } finally {
+      setSavingModel(false)
+    }
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -120,7 +175,7 @@ export default function WorkspaceModal({ open, editWorkspace, onClose, onCreated
       />
 
       {/* Modal */}
-      <div className="relative z-10 w-full max-w-sm mx-4 bg-bina-surface border border-bina-border rounded-2xl shadow-2xl animate-slide-up">
+      <div className="relative z-10 w-full max-w-sm mx-4 bg-bina-surface border border-bina-border rounded-2xl shadow-2xl animate-slide-up overflow-y-auto max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-5 pt-5 pb-4">
           <h2 className="text-bina-text font-semibold text-base">
@@ -202,6 +257,126 @@ export default function WorkspaceModal({ open, editWorkspace, onClose, onCreated
               <p className="text-bina-text text-sm font-medium">{name || 'Workspace name'}</p>
               <p className="text-bina-muted text-xs">0 files</p>
             </div>
+          </div>
+
+          {/* AI Settings */}
+          <div className="border border-bina-border rounded-xl overflow-hidden">
+            {isEditing ? (
+              <button
+                onClick={() => setAiOpen(o => !o)}
+                className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-bina-text hover:bg-bina-border/20 transition-colors"
+              >
+                AI Settings
+                <ChevronDown className={`w-4 h-4 text-bina-muted transition-transform duration-200 ${aiOpen ? 'rotate-180' : ''}`} />
+              </button>
+            ) : (
+              <div className="px-4 py-3 text-sm font-medium text-bina-text border-b border-bina-border/50">
+                AI Settings
+              </div>
+            )}
+
+            {(!isEditing || aiOpen) && (
+              <div className="px-4 pb-4 space-y-4">
+                {/* Processing path */}
+                <div className="pt-3">
+                  <p className="text-bina-muted text-xs font-medium mb-2">Processing path</p>
+                  <div className="space-y-2.5">
+                    {([
+                      ['hosted', 'Hosted AI (recommended)', 'Uses the free hosted server. Fast. Requires internet.'],
+                      ['local', 'Local AI (private)', 'All AI runs on your Mac. Slower. Nothing leaves your device.'],
+                      ['user_api', 'Your API Key', ''],
+                    ] as const).map(([value, label, desc]) => (
+                      <label key={value} className="flex items-start gap-2.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="processing_path"
+                          value={value}
+                          checked={processingPath === value}
+                          onChange={() => setProcessingPath(value)}
+                          className="mt-0.5 accent-bina-accent"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-bina-text text-xs font-medium">{label}</p>
+                          {desc && <p className="text-bina-muted text-[11px] mt-0.5">{desc}</p>}
+                          {value === 'user_api' && processingPath === 'user_api' && (
+                            <div className="mt-2 space-y-2">
+                              <input
+                                type="password"
+                                value={userApiKey}
+                                onChange={e => setUserApiKey(e.target.value)}
+                                placeholder="Paste your OpenAI-compatible API key"
+                                className="w-full bg-bina-bg border border-bina-border rounded-lg px-3 py-2 text-bina-text text-xs placeholder:text-bina-muted/50 focus:outline-none focus:border-bina-accent transition-colors"
+                              />
+                              <input
+                                type="text"
+                                value={userApiBase}
+                                onChange={e => setUserApiBase(e.target.value)}
+                                placeholder="Base URL (optional — leave blank for OpenAI)"
+                                className="w-full bg-bina-bg border border-bina-border rounded-lg px-3 py-2 text-bina-text text-xs placeholder:text-bina-muted/50 focus:outline-none focus:border-bina-accent transition-colors"
+                              />
+                              <input
+                                type="text"
+                                value={modelName}
+                                onChange={e => setModelName(e.target.value)}
+                                placeholder="Model name (e.g. gpt-4o-mini)"
+                                className="w-full bg-bina-bg border border-bina-border rounded-lg px-3 py-2 text-bina-text text-xs placeholder:text-bina-muted/50 focus:outline-none focus:border-bina-accent transition-colors"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Vector store */}
+                <div>
+                  <p className="text-bina-muted text-xs font-medium mb-2">Vector search storage</p>
+                  <div className="space-y-2">
+                    {([
+                      ['chromadb', 'Local (default)', 'Vectors stay on your Mac. No API key needed. Fully offline.'],
+                      ['moorcheh', 'Moorcheh (optional)', 'Hosted vector search. Requires a Moorcheh API key in Settings.'],
+                    ] as const).map(([value, label, desc]) => (
+                      <label key={value} className="flex items-start gap-2.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="vector_backend"
+                          value={value}
+                          checked={vectorBackend === value}
+                          onChange={() => setVectorBackend(value)}
+                          className="mt-0.5 accent-bina-accent"
+                        />
+                        <div>
+                          <p className="text-bina-text text-xs font-medium">{label}</p>
+                          <p className="text-bina-muted text-[11px] mt-0.5">{desc}</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Re-embed warning (edit mode only — on create there's nothing to re-embed) */}
+                {isEditing && processingPath !== originalPath && (
+                  <div className="flex gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20">
+                    <span className="text-yellow-400 text-sm flex-shrink-0">⚠</span>
+                    <p className="text-yellow-300 text-xs leading-relaxed">
+                      Changing the AI path will re-embed all files in this workspace on next index. This may take a few minutes.
+                    </p>
+                  </div>
+                )}
+
+                {/* Save AI Settings sub-button (edit mode only) */}
+                {isEditing && (
+                  <button
+                    onClick={saveModelConfig}
+                    disabled={savingModel}
+                    className="w-full px-4 py-2 rounded-xl bg-bina-accent text-white text-xs font-medium hover:bg-bina-accent/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {modelSavedOk ? 'Saved!' : savingModel ? 'Saving…' : 'Save AI Settings'}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Actions */}

@@ -14,14 +14,12 @@ interface Props {
 }
 
 const MODEL_ICONS: Record<string, React.ReactNode> = {
-  'qwen3:4b':        <Zap className="w-5 h-5 text-bina-accent" />,
-  'qwen2.5vl:3b':   <Eye className="w-5 h-5 text-bina-purple" />,
+  'qwen3.5:2b':       <Eye className="w-5 h-5 text-bina-accent" />,
   'nomic-embed-text': <Cpu className="w-5 h-5 text-bina-green" />,
 }
 
 const MODEL_COLORS: Record<string, string> = {
-  'qwen3:4b':        'border-bina-accent/40 bg-bina-accent/5',
-  'qwen2.5vl:3b':   'border-bina-purple/40 bg-bina-purple/5',
+  'qwen3.5:2b':       'border-bina-accent/40 bg-bina-accent/5',
   'nomic-embed-text': 'border-bina-green/40 bg-bina-green/5',
 }
 

@@ -9,14 +9,17 @@ import type { Workspace } from '../types'
 interface AppStore {
   activeWorkspaceId: string | null
   workspaces: Workspace[]
+  globalSettingsOpen: boolean
   setActiveWorkspace: (id: string) => void
   setWorkspaces: (workspaces: Workspace[]) => void
   loadWorkspaces: () => Promise<void>
+  setGlobalSettingsOpen: (open: boolean) => void
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
   activeWorkspaceId: null,
   workspaces: [],
+  globalSettingsOpen: false,
 
   setActiveWorkspace: (id: string) => {
     set({ activeWorkspaceId: id })
@@ -28,6 +31,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setWorkspaces: (workspaces: Workspace[]) => {
     set({ workspaces })
+  },
+
+  setGlobalSettingsOpen: (open: boolean) => {
+    set({ globalSettingsOpen: open })
   },
 
   loadWorkspaces: async () => {

@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Lock, Folder, ChevronRight, Shield, Eye, HardDrive } from 'lucide-react'
+import { Lock, Folder, ChevronRight, Shield, Eye, HardDrive, Cloud, Cpu, Key } from 'lucide-react'
 import { workspacesApi, openFolder } from '../api'
 import { useAppStore } from '../store/appStore'
 import ModelSetupScreen from './ModelSetupScreen'
@@ -7,11 +7,13 @@ import ModelSetupScreen from './ModelSetupScreen'
 const EMOJIS = ['📁', '📚', '💼', '🔬', '🎨', '📝', '🧪', '📊', '🗂️', '🔒', '💡', '🌍', '🎯', '📐', '🏗️', '🧠', '📌', '🗃️', '🔖', '✏️']
 const COLOURS = ['#4F46E5', '#0D9488', '#D97706', '#DC2626', '#7C3AED', '#DB2777']
 
+type ProcessingPath = 'hosted' | 'local' | 'user_api'
+
 interface Props {
   onComplete: () => void
 }
 
-type Step = 'welcome' | 'privacy' | 'models' | 'folder' | 'workspace'
+type Step = 'welcome' | 'privacy' | 'model_choice' | 'models' | 'folder' | 'workspace'
 
 export default function Onboarding({ onComplete }: Props) {
   const [step, setStep] = useState<Step>('welcome')
@@ -19,11 +21,13 @@ export default function Onboarding({ onComplete }: Props) {
   const [wsName, setWsName] = useState('')
   const [wsEmoji, setWsEmoji] = useState('📁')
   const [wsColour, setWsColour] = useState('#4F46E5')
+  const [processingPath, setProcessingPath] = useState<ProcessingPath>('hosted')
+  const [userApiKey, setUserApiKey] = useState('')
   const [indexing, setIndexing] = useState(false)
   const { setActiveWorkspace, loadWorkspaces } = useAppStore()
   const nameRef = useRef<HTMLInputElement>(null)
 
-  const steps: Step[] = ['welcome', 'privacy', 'models', 'folder', 'workspace']
+  const steps: Step[] = ['welcome', 'privacy', 'model_choice', 'folder', 'workspace']
 
   async function handlePickFolder() {
     const picked = await openFolder()
@@ -40,7 +44,12 @@ export default function Onboarding({ onComplete }: Props) {
     setIndexing(true)
     try {
       // Create workspace
-      const ws = await workspacesApi.create(wsName.trim(), wsEmoji, wsColour)
+      const ws = await workspacesApi.create(
+        wsName.trim(), wsEmoji, wsColour,
+        processingPath,
+        undefined,
+        processingPath === 'user_api' ? userApiKey : undefined,
+      )
       // Add folder — this also starts the watcher and background scan
       await workspacesApi.addFolder(ws.id, folder)
       // Persist active workspace
@@ -126,7 +135,114 @@ export default function Onboarding({ onComplete }: Props) {
                 </div>
               ))}
             </div>
-            <button onClick={() => setStep('models')} className="btn-primary">
+            <button onClick={() => setStep('model_choice')} className="btn-primary">
+              Continue <ChevronRight className="w-4 h-4 ml-1" />
+            </button>
+          </div>
+        )}
+
+        {/* Model selection step */}
+        {step === 'model_choice' && (
+          <div className="flex flex-col items-center text-center max-w-lg animate-slide-up">
+            <div className="w-16 h-16 rounded-2xl bg-bina-accent/10 border border-bina-accent/20 flex items-center justify-center mb-6">
+              <Cpu className="w-8 h-8 text-bina-accent" />
+            </div>
+            <h2 className="text-3xl font-display font-semibold text-bina-text mb-2">
+              Choose your AI
+            </h2>
+            <p className="text-bina-muted mb-8 text-sm">
+              How would you like Bina to process your files?
+            </p>
+
+            <div className="w-full space-y-3 mb-8">
+              {/* Hosted */}
+              <button
+                onClick={() => setProcessingPath('hosted')}
+                className={`w-full text-left p-4 rounded-2xl border-2 transition-all ${
+                  processingPath === 'hosted'
+                    ? 'border-bina-accent bg-bina-accent/5'
+                    : 'border-bina-border hover:border-bina-border/80'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <Cloud className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
+                    processingPath === 'hosted' ? 'text-bina-accent' : 'text-bina-muted'
+                  }`} />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-bina-text font-medium text-sm">Hosted AI</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-bina-green/10 text-bina-green border border-bina-green/20">Recommended</span>
+                    </div>
+                    <p className="text-bina-muted text-xs mt-1">120B model · Free · Fast · No setup needed</p>
+                  </div>
+                </div>
+              </button>
+
+              {/* Local */}
+              <button
+                onClick={() => setProcessingPath('local')}
+                className={`w-full text-left p-4 rounded-2xl border-2 transition-all ${
+                  processingPath === 'local'
+                    ? 'border-bina-accent bg-bina-accent/5'
+                    : 'border-bina-border hover:border-bina-border/80'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <HardDrive className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
+                    processingPath === 'local' ? 'text-bina-accent' : 'text-bina-muted'
+                  }`} />
+                  <div>
+                    <span className="text-bina-text font-medium text-sm">Local AI (Ollama)</span>
+                    <p className="text-bina-muted text-xs mt-1">Private · Slower · Requires Ollama + models</p>
+                  </div>
+                </div>
+              </button>
+
+              {/* User API */}
+              <button
+                onClick={() => setProcessingPath('user_api')}
+                className={`w-full text-left p-4 rounded-2xl border-2 transition-all ${
+                  processingPath === 'user_api'
+                    ? 'border-bina-accent bg-bina-accent/5'
+                    : 'border-bina-border hover:border-bina-border/80'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <Key className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
+                    processingPath === 'user_api' ? 'text-bina-accent' : 'text-bina-muted'
+                  }`} />
+                  <div>
+                    <span className="text-bina-text font-medium text-sm">Your API Key</span>
+                    <p className="text-bina-muted text-xs mt-1">Use your own OpenAI key · Your billing</p>
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            {/* API Key input for user_api path */}
+            {processingPath === 'user_api' && (
+              <div className="w-full mb-6">
+                <input
+                  type="password"
+                  value={userApiKey}
+                  onChange={e => setUserApiKey(e.target.value)}
+                  placeholder="sk-..."
+                  className="w-full bg-bina-bg border border-bina-border rounded-xl px-3 py-2.5 text-bina-text text-sm placeholder:text-bina-muted/50 focus:outline-none focus:border-bina-accent font-mono"
+                />
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                if (processingPath === 'local') {
+                  setStep('models')  // Go to Ollama model install screen
+                } else {
+                  setStep('folder')  // Skip model setup
+                }
+              }}
+              disabled={processingPath === 'user_api' && !userApiKey.trim()}
+              className="btn-primary w-full disabled:opacity-40 disabled:cursor-not-allowed"
+            >
               Continue <ChevronRight className="w-4 h-4 ml-1" />
             </button>
           </div>

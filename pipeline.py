@@ -4,10 +4,9 @@ Local AI pipeline.
 process_file(path, workspace_id, force=False)
     1. MD5 hash → register in workspace; skip AI if already indexed globally
     2. Extract text (or image bytes for images) → smart sample
-    3a. [Images] qwen2.5vl:3b vision model → visual description text
-    3b. [Text] qwen3:4b LLM → structured JSON (summary, keywords, entities, doc_type)
-    4. nomic-embed-text → 768-dim vector
-    5. Write to SQLite (store.py) + ChromaDB (vector_store.py)
+    3. Call inference (hosted GPT-OSS, local Ollama, or user API) for structured JSON
+    4. Embed via nomic-embed-text (local) or OpenAI fallback
+    5. Write to SQLite (store.py) + vector store (Moorcheh or ChromaDB)
     6. Return metadata dict
 
 remove_file(path, workspace_id)
@@ -23,38 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import ollama
-
 import store
-import vector_store
-import graph as _graph
-from config import EMBED_MODEL, LLM_MODEL, VISION_MODEL, LLM_CHAR_BUDGET, IMAGE_EXTENSIONS
+import vector_store_router
+from inference import call_inference, embed_text
+from config import LLM_CHAR_BUDGET
 from extractor import extract
 from sampler import sample
-
-_LLM_PROMPT = """\
-You are a document analysis assistant. Analyse the document text below and respond with ONLY a valid JSON object — no markdown, no explanation.
-
-Required JSON structure:
-{{
-  "summary": "<exactly 3 sentences describing what this document is about>",
-  "keywords": ["<keyword1>", "<keyword2>", "...", "<up to 10 keywords>"],
-  "entities": {{
-    "persons": ["<name>", ...],
-    "companies": ["<name>", ...],
-    "dates": ["<date string>", ...],
-    "projects": ["<project name>", ...],
-    "locations": ["<location>", ...]
-  }},
-  "doc_type": "<one of: Invoice, Research Paper, Meeting Notes, Contract, Book Chapter, Report, Presentation, Email, Legal Document, Technical Documentation, Personal Notes, Assignment, Course Syllabus, Lecture Notes, README, Other>"
-}}
-
-Document text:
----
-{text}
----
-
-Respond with ONLY the JSON object."""
+import graph as _graph
 
 
 def _md5(path: Path) -> str:
@@ -67,6 +41,8 @@ def _md5(path: Path) -> str:
 
 def _repair_json(text: str) -> str:
     """Best-effort repair of common LLM JSON output quirks."""
+    # Strip <think>...</think> blocks (qwen3.5 thinking mode)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text).strip()
     text = re.sub(r"//[^\n]*", "", text)
@@ -92,56 +68,18 @@ def _parse_llm_response(response_text: str) -> dict[str, Any]:
         raise
 
 
-def _call_llm(text: str) -> dict[str, Any]:
-    prompt = _LLM_PROMPT.format(text=text)
-    input_tokens = len(prompt) // 4
-    num_ctx = max(1024, min(input_tokens + 512, 4096))
-    response = ollama.chat(
-        model=LLM_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        options={"temperature": 0.1, "num_ctx": num_ctx},
-    )
-    raw = response["message"]["content"]
-    return _parse_llm_response(raw)
-
-
-def _call_embed(text: str) -> list[float]:
-    response = ollama.embeddings(model=EMBED_MODEL, prompt=text)
-    return response["embedding"]
-
-
-def _call_vision(image_bytes: bytes) -> str:
-    """Use qwen2.5vl to describe an image. Returns a text description."""
-    import base64
-    b64 = base64.b64encode(image_bytes).decode()
-    response = ollama.chat(
-        model=VISION_MODEL,
-        messages=[{
-            "role": "user",
-            "content": (
-                "You are a document archivist. Describe this image in detail for search and archiving purposes. "
-                "Include any visible text, charts, diagrams, people, objects, colours, and context. "
-                "Be thorough — aim for 3-5 sentences."
-            ),
-            "images": [b64],
-        }],
-        options={"temperature": 0.1},
-    )
-    return response["message"]["content"].strip()
-
-
 def unload_models() -> None:
-    """Explicitly unload all models from RAM when indexing is complete."""
+    """Explicitly unload local Ollama models from RAM when indexing is complete."""
     try:
-        ollama.chat(model=LLM_MODEL, messages=[], keep_alive=0)
+        import ollama
+        from config import LOCAL_MODEL, LOCAL_EMBED_MODEL
+        ollama.chat(model=LOCAL_MODEL, messages=[], keep_alive=0)
     except Exception:
         pass
     try:
-        ollama.chat(model=VISION_MODEL, messages=[], keep_alive=0)
-    except Exception:
-        pass
-    try:
-        ollama.embeddings(model=EMBED_MODEL, prompt="", keep_alive=0)
+        import ollama
+        from config import LOCAL_EMBED_MODEL
+        ollama.embeddings(model=LOCAL_EMBED_MODEL, prompt="", keep_alive=0)
     except Exception:
         pass
 
@@ -154,12 +92,11 @@ def process_file(
     """
     Process a single file for a specific workspace.
 
-    If the file has already been indexed globally (same hash, status='done'),
-    AI processing is skipped — only the workspace association is registered.
+    Uses the workspace's configured processing path (hosted/local/user_api)
+    for inference, and the workspace's vector backend for storage.
 
     Returns a dict with keys: path, hash, summary, keywords, entities,
     doc_type, status, error.
-    Raises nothing — all errors are caught and stored as status='failed'.
     """
     path = Path(path).resolve()
     result: dict[str, Any] = {"path": str(path), "status": "ok", "error": None}
@@ -167,9 +104,11 @@ def process_file(
     try:
         file_hash = _md5(path)
 
+        # Load workspace config for inference + vector store selection
+        workspace = store.get_workspace(workspace_id)
+        vstore = vector_store_router.get_store(workspace_id)
+
         # Deduplication: skip AI if this hash is already fully indexed globally.
-        # add_file_to_workspace is safe here because the FileRecord already exists
-        # (workspace_files.file_hash is a FK → file_records.hash).
         if not force and store.file_already_indexed(file_hash):
             store.add_file_to_workspace(workspace_id, file_hash)
             existing = store.get_file_by_hash(file_hash)
@@ -185,57 +124,56 @@ def process_file(
                 "error": None,
             }
 
-        # Text extraction + sampling
+        # Text / image extraction
         extraction = extract(path)
 
         if extraction.is_image:
-            # ---------------------------------------------------------------
-            # Image path: use vision model to get a text description, then
-            # treat that description as the document's "text" content.
-            # ---------------------------------------------------------------
-            vision_error: str | None = None
-            try:
-                visual_description = _call_vision(extraction.image_bytes)
-            except Exception as ve:
-                vision_error = str(ve)
-                visual_description = f"[Image description unavailable: {vision_error}]"
+            # Image path: send bytes directly to inference
+            img_size_mb = len(extraction.image_bytes) / 1_048_576
+            if img_size_mb > 20:
+                raise ValueError(
+                    f"Image too large to process ({img_size_mb:.1f} MB > 20 MB limit)."
+                )
 
-            # Feed visual description into the normal LLM pipeline
-            llm_text = visual_description[:LLM_CHAR_BUDGET]
-            sampled_text = visual_description  # for embedding
+            raw_response = call_inference(
+                text="", workspace=workspace,
+                image_bytes=extraction.image_bytes,
+            )
+            llm_data = _parse_llm_response(raw_response)
+            summary = llm_data.get("summary", "")
+            keywords = llm_data.get("keywords", [])
+            sampled_text = f"{summary} {' '.join(keywords)}"
+
         else:
-            # ---------------------------------------------------------------
-            # Normal text path
-            # ---------------------------------------------------------------
+            # Text path: extract, sample, analyse
             sampled_text = sample(extraction.pages)
             if not sampled_text.strip():
                 raise ValueError("No text could be extracted from this file.")
-            llm_text = sampled_text[:LLM_CHAR_BUDGET]
-            vision_error = None
-        # LLM analysis
-        llm_error: str | None = None
-        try:
-            llm_data = _call_llm(llm_text)
-        except Exception as llm_err:
-            llm_error = str(llm_err)
-            llm_data = {
-                "summary": None,
-                "keywords": [],
-                "entities": {},
-                "doc_type": "Other",
-            }
 
-        summary = llm_data.get("summary", "")
-        keywords = llm_data.get("keywords", [])
+            raw_response = call_inference(
+                text=sampled_text[:LLM_CHAR_BUDGET],
+                workspace=workspace,
+            )
+            llm_data = _parse_llm_response(raw_response)
+            summary = llm_data.get("summary", "")
+            keywords = llm_data.get("keywords", [])
+
         entities = llm_data.get("entities", {})
         doc_type = llm_data.get("doc_type", "Other")
 
-        # Embedding
-        embed_text = f"{summary}\n{' '.join(keywords)}\n{sampled_text[:6000]}"
-        embedding = _call_embed(embed_text)
+        # Handle empty summary
+        llm_error: str | None = None
+        if not summary:
+            llm_error = "Model returned empty summary"
 
-        # Persist to SQLite FIRST — FileRecord must exist before we can create
-        # the workspace_files FK row (add_file_to_workspace below).
+        # Determine which embed model was used
+        embed_model_name = getattr(workspace, "embed_model", "nomic-embed-text") if workspace else "nomic-embed-text"
+
+        # Embedding
+        embed_text_str = f"{summary}\n{' '.join(keywords)}\n{sampled_text[:6000]}"
+        embedding = embed_text(embed_text_str, workspace=workspace)
+
+        # Persist to SQLite
         store.upsert_file(
             hash=file_hash,
             path=str(path),
@@ -246,33 +184,55 @@ def process_file(
             status="done",
             error=llm_error,
             processed_at=datetime.now(timezone.utc),
+            embedding_model=embed_model_name,
         )
 
-        # Register in workspace AFTER FileRecord exists (FK constraint satisfied)
         store.add_file_to_workspace(workspace_id, file_hash)
 
-        # Persist to ChromaDB — ID is the hash
-        vector_store.upsert(
-            file_hash=file_hash,
-            embedding=embedding,
-            metadata={
-                "path": str(path),
-                "doc_type": doc_type or "",
-                "summary_snippet": (summary or "")[:200],
-            },
-        )
+        # Persist to vector store (Moorcheh or ChromaDB)
+        _meta = {
+            "path": str(path),
+            "doc_type": doc_type or "",
+            "summary_snippet": (summary or "")[:200],
+            "embedding_model": embed_model_name,
+        }
+        import vector_store_local as _local_vs
+        try:
+            vstore.upsert(file_hash=file_hash, embedding=embedding, metadata=_meta)
+        except Exception as _ve:
+            # Primary store failed (e.g. Moorcheh auth error). Fall back to local
+            # ChromaDB so the file is still searchable — user can fix their API key
+            # in Settings and re-index later.
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                f"Primary vector store failed, falling back to ChromaDB: {_ve}"
+            )
+            vstore = _local_vs
+            _local_vs.upsert(file_hash=file_hash, embedding=embedding, metadata=_meta)
+
+        # Always cache embedding in local ChromaDB so graph.py can always
+        # retrieve raw vectors for cosine-similarity edge building.
+        # Moorcheh does not support get_embeddings_by_hashes(), so without this
+        # local cache the graph would silently re-embed every file on each build.
+        if vstore is not _local_vs:
+            try:
+                _local_vs.upsert(
+                    file_hash=file_hash,
+                    embedding=embedding,
+                    metadata=_meta,
+                )
+            except Exception:
+                pass
 
         _graph.mark_dirty(workspace_id)
 
-        result.update(
-            {
-                "hash": file_hash,
-                "summary": summary,
-                "keywords": keywords,
-                "entities": entities,
-                "doc_type": doc_type,
-            }
-        )
+        result.update({
+            "hash": file_hash,
+            "summary": summary,
+            "keywords": keywords,
+            "entities": entities,
+            "doc_type": doc_type,
+        })
 
     except Exception as exc:
         error_msg = str(exc)
@@ -307,5 +267,6 @@ def remove_file(path: str | Path, workspace_id: str) -> None:
 
     remaining_refs = store.count_workspace_refs(record.hash)
     if remaining_refs == 0:
-        vector_store.delete(record.hash)
+        vstore = vector_store_router.get_store(workspace_id)
+        vstore.delete(record.hash)
         store.delete_file(record.hash)

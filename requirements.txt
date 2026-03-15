@@ -11,3 +11,6 @@ watchdog>=4.0.0
 fastapi>=0.111.0
 uvicorn>=0.30.0
 Pillow>=10.0.0
+openai>=1.0.0
+railtracks
+moorcheh-sdk

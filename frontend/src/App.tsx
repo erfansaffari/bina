@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react'
-import { modelsApi } from './api'
 import { useAppStore } from './store/appStore'
 import Onboarding from './components/Onboarding'
 import MainLayout from './components/MainLayout'
@@ -7,22 +6,9 @@ import MainLayout from './components/MainLayout'
 export default function App() {
   const { workspaces, loadWorkspaces } = useAppStore()
   const [ready, setReady] = useState(false)
-  const [modelsReady, setModelsReady] = useState(true) // optimistic — corrected after check
 
   useEffect(() => {
-    async function init() {
-      await loadWorkspaces()
-      // Check which Ollama models are installed
-      try {
-        const result = await modelsApi.status()
-        setModelsReady(result.all_ready)
-      } catch {
-        // Backend not yet ready — assume OK; onboarding will recheck
-        setModelsReady(true)
-      }
-      setReady(true)
-    }
-    init()
+    loadWorkspaces().then(() => setReady(true))
   }, [loadWorkspaces])
 
   if (!ready) {
@@ -33,18 +19,11 @@ export default function App() {
     )
   }
 
-  const hasWorkspaces = workspaces.length > 0
-
-  // Show onboarding if no workspaces, OR if required AI models are missing
-  if (!hasWorkspaces || !modelsReady) {
-    return (
-      <Onboarding
-        onComplete={() => {
-          loadWorkspaces()
-          setModelsReady(true)
-        }}
-      />
-    )
+  // Only show onboarding for brand-new users with no workspaces.
+  // Model setup is handled inside the Onboarding flow (models step)
+  // and also accessible from Settings → AI Models for existing users.
+  if (workspaces.length === 0) {
+    return <Onboarding onComplete={() => loadWorkspaces()} />
   }
 
   return <MainLayout />

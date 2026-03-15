@@ -43,6 +43,7 @@ export interface SearchResult {
 export interface StatusData {
   indexed: number
   failed: number
+  failed_reasons?: string[]
   vectors: number
   watched_folder: string | null
   watched_folders: string[]
@@ -69,6 +70,10 @@ export interface Workspace {
   folder_count: number
   created_at: string
   last_opened: string
+  // v3 model selection
+  processing_path?: 'hosted' | 'local' | 'user_api'
+  model_name?: string
+  vector_backend?: 'moorcheh' | 'chromadb'
 }
 
 export interface WorkspaceFolder {
@@ -78,3 +83,23 @@ export interface WorkspaceFolder {
 }
 
 export type AppScreen = 'onboarding' | 'main'
+
+export interface QueryResult {
+  answer: string | null
+  results?: Array<{ hash: string; name: string; path: string; summary: string; score: number }>
+  mode: 'agent' | 'search' | 'fallback'
+  workspace_id: string
+}
+
+export interface WorkspaceModelConfig {
+  processing_path: string
+  model_name: string | null
+  embed_model: string
+  vector_backend: string
+  has_user_api_key?: boolean
+}
+
+export interface AppSettingsResponse {
+  moorcheh_api_key_set: boolean
+  moorcheh_connected: boolean
+}

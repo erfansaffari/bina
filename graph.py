@@ -25,7 +25,7 @@ import numpy as np
 import networkx as nx
 
 import store
-import vector_store
+import vector_store_router
 from config import ENTITY_BOOST, MAX_GRAPH_NEIGHBOURS, SIMILARITY_THRESHOLD
 
 try:
@@ -128,7 +128,45 @@ def _build_graph_locked(workspace_id: str) -> nx.Graph:
         return G
 
     hashes = [r.hash for r in records]
-    embeddings = vector_store.get_embeddings_by_hashes(hashes)
+
+    # Always fetch from local ChromaDB — it's the reliable embedding cache.
+    # Moorcheh does not support get_embeddings_by_hashes(), so using the router
+    # here would return {} and force every file to be re-embedded on each build.
+    import vector_store_local as _local_vs
+    embeddings = _local_vs.get_embeddings_by_hashes(hashes)
+
+    # Re-embed any files genuinely missing from the local cache
+    # (e.g. indexed before the dual-write was added), using their stored summary+keywords.
+    # Also back-fills the ChromaDB cache so subsequent builds skip this step.
+    missing = [h for h in hashes if h not in embeddings]
+    if missing:
+        ws = store.get_workspace(workspace_id)
+        for h in missing:
+            rec = store.get_file_by_hash(h)
+            if rec and rec.status == "done":
+                text = (
+                    f"{rec.summary or ''} {' '.join(store.parse_keywords(rec))}"
+                )[:2000].strip()
+                if text:
+                    try:
+                        from inference import embed_text
+                        emb = embed_text(text, workspace=ws)
+                        embeddings[h] = emb
+                        # Back-fill local ChromaDB cache to avoid re-embedding next time
+                        try:
+                            _local_vs.upsert(
+                                file_hash=h,
+                                embedding=emb,
+                                metadata={
+                                    "path": rec.path or "",
+                                    "doc_type": rec.doc_type or "",
+                                    "summary_snippet": (rec.summary or "")[:200],
+                                },
+                            )
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
 
     # Add nodes (ID = hash)
     for rec in records:

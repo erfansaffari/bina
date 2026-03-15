@@ -7,6 +7,8 @@ import Inspector from './Inspector'
 import Sidebar from './Sidebar'
 import WorkspaceSwitcher from './WorkspaceSwitcher'
 import WorkspaceModal from './WorkspaceModal'
+import SettingsModal from './SettingsModal'
+import AskBinaPanel from './AskBinaPanel'
 import type { GraphNode, GraphEdge, StatusData, ProgressData, Workspace } from '../types'
 
 interface Props {
@@ -15,7 +17,7 @@ interface Props {
 }
 
 export default function MainLayout({ initialStatus = null, onNeedOnboarding = () => {} }: Props) {
-  const { activeWorkspaceId, loadWorkspaces, workspaces } = useAppStore()
+  const { activeWorkspaceId, loadWorkspaces, workspaces, globalSettingsOpen, setGlobalSettingsOpen } = useAppStore()
 
   const [fullNodes, setFullNodes] = useState<GraphNode[]>([])
   const [fullEdges, setFullEdges] = useState<GraphEdge[]>([])
@@ -25,6 +27,7 @@ export default function MainLayout({ initialStatus = null, onNeedOnboarding = ()
   const [progress, setProgress] = useState<ProgressData | null>(null)
   const [searchMs, setSearchMs] = useState<number | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [viewMode, setViewMode] = useState<'graph' | 'ask'>('graph')
 
   // Workspace modal state
   const [wsModalOpen, setWsModalOpen] = useState(false)
@@ -188,28 +191,72 @@ export default function MainLayout({ initialStatus = null, onNeedOnboarding = ()
 
       {/* Main area */}
       <div className="flex flex-1 flex-col min-w-0 relative">
-        <div className="relative z-20 px-6 pt-14 pb-3 no-drag">
-          <SearchBar onSearch={handleSearch} searchMs={searchMs} />
+        <div className="relative z-20 px-6 pt-14 pb-3 no-drag flex items-center gap-3">
+          {viewMode === 'graph' && (
+            <div className="flex-1">
+              <SearchBar onSearch={handleSearch} searchMs={searchMs} />
+            </div>
+          )}
+          {viewMode === 'ask' && (
+            <div className="flex-1">
+              <h2 className="text-bina-text text-lg font-display font-semibold">Ask Bina</h2>
+            </div>
+          )}
+          {/* Mode toggle */}
+          <div className="flex bg-bina-surface border border-bina-border rounded-xl overflow-hidden shrink-0">
+            <button
+              onClick={() => setViewMode('graph')}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                viewMode === 'graph'
+                  ? 'bg-bina-accent text-white'
+                  : 'text-bina-muted hover:text-bina-text'
+              }`}
+            >
+              Graph
+            </button>
+            <button
+              onClick={() => setViewMode('ask')}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                viewMode === 'ask'
+                  ? 'bg-bina-accent text-white'
+                  : 'text-bina-muted hover:text-bina-text'
+              }`}
+            >
+              Ask
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 relative no-drag">
-          <GraphCanvas
-            nodes={fullNodes}
-            edges={fullEdges}
-            selectedNodeId={selectedNode?.id ?? null}
-            searchScores={searchScores}
-            onNodeClick={handleNodeClick}
-            onNodeDeleted={loadFullGraph}
-          />
+          {viewMode === 'graph' ? (
+            <>
+              <GraphCanvas
+                nodes={fullNodes}
+                edges={fullEdges}
+                selectedNodeId={selectedNode?.id ?? null}
+                searchScores={searchScores}
+                onNodeClick={handleNodeClick}
+                onNodeDeleted={loadFullGraph}
+              />
 
-          {/* Empty state */}
-          {fullNodes.length === 0 && !progress?.running && activeWorkspaceId && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="text-center animate-fade-in">
-                <p className="text-bina-muted text-lg font-display">No files indexed yet</p>
-                <p className="text-bina-muted/60 text-sm mt-1">Add a folder to get started</p>
-              </div>
-            </div>
+              {/* Empty state */}
+              {fullNodes.length === 0 && !progress?.running && activeWorkspaceId && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className="text-center animate-fade-in">
+                    <p className="text-bina-muted text-lg font-display">No files indexed yet</p>
+                    <p className="text-bina-muted/60 text-sm mt-1">Add a folder to get started</p>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            activeWorkspaceId
+              ? <AskBinaPanel workspaceId={activeWorkspaceId} />
+              : (
+                <div className="flex items-center justify-center h-full text-bina-muted text-sm">
+                  Select a workspace to start asking questions
+                </div>
+              )
           )}
 
           {/* Indexing overlay */}
@@ -250,6 +297,13 @@ export default function MainLayout({ initialStatus = null, onNeedOnboarding = ()
         editWorkspace={wsToEdit}
         onClose={handleCloseWsModal}
         onCreated={() => loadFullGraph()}
+      />
+
+      {/* Settings modal — opened from sidebar, gear icon, or error messages */}
+      <SettingsModal
+        open={globalSettingsOpen}
+        onClose={() => setGlobalSettingsOpen(false)}
+        onIndexCleared={() => { loadWorkspaces(); loadFullGraph() }}
       />
     </div>
   )

@@ -1,126 +1,82 @@
-# Bina — Phase 0 CLI
+# Bina v3 — Local AI Semantic File Manager
 
-> بینا — "one who sees clearly"
+> بینا (Bina) — "one who sees clearly"
 
-A local AI semantic file manager CLI. Watch any folder, let Bina read and understand every document using fully on-device AI, then find anything with a natural language question.
-
-**100% private. No API keys. No internet after first model download.**
+Bina is an AI-powered semantic file manager and workspace assistant for macOS. Unlike traditional search that relies on exact keywords, Bina reads, understands, and connects your documents in a knowledge graph, allowing you to find files by meaning or chat directly with your entire folder using natural language.
 
 ---
 
-## Prerequisites
+## What's New in v3?
 
-1. **Python 3.11+**
-2. **Ollama** installed and running:
-   ```bash
-   brew install ollama
-   ollama serve   # keep this running in a separate terminal
-   ```
-3. **Pull the required models** (one-time, ~2.3 GB total):
-   ```bash
-   ollama pull llama3.2:3b
-   ollama pull nomic-embed-text
-   ```
+Bina has evolved from a CLI tool into a full React/Electron desktop application with pluggable AI reasoning paths:
+
+1. **Ask Bina (Railtracks Agent)**
+   A complete conversational interface. You can search, summarize, or chat with your documents. The agent automatically figures out when to run semantic searches, read summaries, or fetch neighboring files in the knowledge graph.
+2. **Per-Workspace AI Models**
+   Each workspace can now have its own AI processing path.
+   * **Hosted (Free & Fast):** Uses a powerful 120B parameter hosted model via HuggingFace API.
+   * **Local (Private):** Runs 100% offline on your Mac using Ollama (`qwen3.5:2b`).
+   * **User API:** Use your own OpenAI API key.
+3. **Moorcheh Vector Store**
+   Now uses the blazingly fast `moorcheh-sdk` for cloud-synced vector storage (with local ChromaDB fallback available).
+4. **Knowledge Graph Visualizer**
+   A beautiful, auto-clustering 2D force graph that groups your files by semantic similarity and community paths.
 
 ---
 
-## Installation
+## 🚀 Quick Start (Development)
+
+### 1. Backend Setup
+
+Bina requires Python 3.11+.
 
 ```bash
-# Clone / navigate to this directory, then:
+# Clone the repository and setup the backend virtual environment:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
----
+You must provide a Moorcheh API Key for the vector store. Create a `.env` file in `~/.bina/.env`:
+```
+MOORCHEH_API_KEY=your_moorcheh_key_here
+```
 
-## Usage
+Start the FastAPI sidecar:
+```bash
+python backend/api.py
+```
 
-### Index a folder (and watch it for changes)
+### 2. Frontend Setup
+
+The frontend is an Electron app wrapping a React + Vite PWA.
 
 ```bash
-python main.py index /path/to/your/documents
-```
-
-Bina will:
-- Scan all PDF, DOCX, TXT, and MD files recursively
-- Process each file through the local AI pipeline (summary, keywords, entities, embedding)
-- Store everything in `~/.bina/` (SQLite + ChromaDB)
-- Continue watching the folder for new or modified files
-
-### Search
-
-```bash
-python main.py search
-```
-
-Launches an interactive REPL:
-
-```
-bina> reports about renewable energy subsidies in Europe
-bina> that invoice from the design project last year
-bina> open 3        ← opens result #3 in its default macOS app
-bina> q             ← quit
-```
-
-### Check status
-
-```bash
-python main.py status
-```
-
-### Force re-index everything
-
-```bash
-python main.py reindex
+# In a new terminal tab:
+cd frontend
+npm install
+npm run dev
 ```
 
 ---
 
-## Data Storage
+## 🧠 Local AI Path (Optional)
 
-All data lives in `~/.bina/`:
+If you prefer to keep your files 100% private, you can choose the **Local AI** path during workspace creation. This requires Ollama.
 
-| Path | Contents |
-|---|---|
-| `~/.bina/bina.db` | SQLite: file paths, hashes, summaries, keywords, entities |
-| `~/.bina/chroma/` | ChromaDB: 384-dim embedding vectors |
-| `~/.bina/watched_folder.txt` | Last selected folder (persists across launches) |
+1. Install Ollama: `brew install ollama`
+2. Bina's smart onboarding will automatically pull the necessary models (`qwen3.5:2b` & `nomic-embed-text`) for you if you select the local path.
 
 ---
 
-## Architecture
+## Architecture Stack
 
-```
-Watched Folder
-     │ FSEvents (watchdog)
-     ▼
-extractor.py  →  sampler.py  →  pipeline.py (Ollama)
-                                     │
-                          ┌──────────┴──────────┐
-                          ▼                     ▼
-                     store.py             vector_store.py
-                     (SQLite)              (ChromaDB)
-                          │                     │
-                          └──────────┬──────────┘
-                                     ▼
-                                  graph.py
-                                (NetworkX)
-                                     │
-                                     ▼
-                                  search.py
-                                  (REPL)
-```
+Bina's v3 architecture is split into a seamless Electron IPC bridge communicating with a FastAPI Python sidecar.
 
----
-
-## Model Tiers
-
-| Mode | Model | Download | Speed | RAM |
-|---|---|---|---|---|
-| Fast (default) | `llama3.2:3b` | ~2 GB | 3–5s/file | 4 GB+ |
-| Smart | `llama3.1:8b` | ~5 GB | 8–15s/file | 8 GB+ |
-| Embedding (both) | `nomic-embed-text` | 274 MB | <200ms/chunk | Any |
-
-Switch model by editing `LLM_MODEL` in `config.py`.
+* **Frontend:** React 18, Vite, Tailwind CSS, Zustand, `react-force-graph-2d`
+* **Desktop Wrapper:** Electron 32
+* **Backend:** FastAPI, Python 3.11+
+* **Reasoning Agent:** Railtracks
+* **Vector Store:** Moorcheh SDK (Router pattern with ChromaDB legacy fallback)
+* **Metadata Store:** SQLite (`~/.bina/bina.db`)
+* **Local Inference:** Ollama 

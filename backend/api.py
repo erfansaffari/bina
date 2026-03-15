@@ -1,5 +1,5 @@
 """
-Bina FastAPI sidecar — v2 with workspace support.
+Bina FastAPI sidecar — v3 with workspace model selection.
 
 Spawned by Electron as a child process. Exposes a REST API on
 http://localhost:8765 that the React renderer calls over HTTP.
@@ -9,6 +9,7 @@ Endpoints
 GET  /status?workspace_id=         → per-workspace stats
 GET  /progress                     → current indexing progress
 POST /search                       → semantic search (workspace-scoped)
+POST /query                        → agent or search query
 GET  /graph?workspace_id=          → full workspace graph
 POST /watch                        → start watcher for a workspace folder
 DELETE /watch                      → stop watcher for a workspace folder
@@ -17,17 +18,23 @@ GET  /files                        → list all indexed file records
 GET  /global/status                → global stats (dedup savings)
 
 GET  /workspaces                   → list all workspaces
-POST /workspaces                   → create workspace
+POST /workspaces                   → create workspace (with model config)
 PATCH /workspaces/:id              → update workspace (name/emoji/colour)
 DELETE /workspaces/:id             → delete workspace + orphan purge
 GET  /workspaces/:id/folders       → list folders in workspace
 POST /workspaces/:id/folders       → add folder + start watcher + scan
 DELETE /workspaces/:id/folders     → remove folder + stop watcher + purge
+GET  /workspaces/:id/model         → get workspace AI config
+PATCH /workspaces/:id/model        → update workspace AI config
+
+GET  /settings/app                 → check global app settings (Moorcheh key status)
+POST /settings/app                 → save global app settings to ~/.bina/.env
 """
 from __future__ import annotations
 
 import sys
 import os
+import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,13 +50,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import store
-import vector_store
+import vector_store_router
 import pipeline as _pipeline
 import graph as _graph
 from config import SUPPORTED_EXTENSIONS
 from graph import get_graph, subgraph_for_paths, mark_dirty, mark_all_dirty
 from search import search as _search
 from watcher import FolderWatcher
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +126,11 @@ def _stop_all_watchers_for_workspace(workspace_id: str) -> None:
 def _purge_orphans() -> None:
     """Remove index records for files that no longer exist on disk."""
     removed = 0
+    vstore = vector_store_router.get_store()
     for rec in store.get_all_files():
         if not Path(rec.path).exists():
             store.delete_file(rec.hash)
-            vector_store.delete(rec.hash)
+            vstore.delete(rec.hash)
             removed += 1
     if removed:
         mark_all_dirty()
@@ -243,7 +253,7 @@ async def _lifespan(app: FastAPI):
     _watchers.clear()
 
 
-app = FastAPI(title="Bina API", version="2.0.0", lifespan=_lifespan)
+app = FastAPI(title="Bina API", version="3.0.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -335,6 +345,11 @@ class SearchRequest(BaseModel):
     workspace_id: str
     limit: int = 20
 
+class QueryRequest(BaseModel):
+    query: str
+    workspace_id: str
+    mode: str = "agent"  # "agent" | "search"
+
 class WatchRequest(BaseModel):
     path: str
     workspace_id: str
@@ -351,17 +366,36 @@ class CreateWorkspaceRequest(BaseModel):
     name: str
     emoji: str = "📁"
     colour: str = "#4F46E5"
+    processing_path: str = "hosted"
+    model_name: str | None = None
+    user_api_key: str | None = None
+    user_api_base: str | None = None
+    vector_backend: str = "moorcheh"
 
 class UpdateWorkspaceRequest(BaseModel):
     name: str | None = None
     emoji: str | None = None
     colour: str | None = None
 
+class WorkspaceModelConfig(BaseModel):
+    processing_path: str | None = None
+    model_name: str | None = None
+    user_api_key: str | None = None
+    user_api_base: str | None = None
+    vector_backend: str | None = None
+
 class AddFolderRequest(BaseModel):
     path: str
 
 class RemoveFolderRequest(BaseModel):
     path: str
+
+class AppSettingsRequest(BaseModel):
+    moorcheh_api_key: str | None = None
+
+class AppSettingsResponse(BaseModel):
+    moorcheh_api_key_set: bool
+    moorcheh_connected: bool
 
 
 # ---------------------------------------------------------------------------
@@ -379,13 +413,20 @@ def status(workspace_id: str | None = None):
         indexed = sum(1 for f in files if f.status == "done")
         failed = sum(1 for f in files if f.status == "failed")
 
+        failed_reasons = list({
+            f.error for f in files
+            if f.status == "failed" and getattr(f, "error", None)
+        })[:3]
+
         G = get_graph(workspace_id)
         folders = store.get_folders_for_workspace(workspace_id)
 
+        vstore = vector_store_router.get_store(workspace_id)
         return {
             "indexed": indexed,
             "failed": failed,
-            "vectors": vector_store.count(),
+            "failed_reasons": failed_reasons,
+            "vectors": vstore.count(),
             "watched_folder": folders[0] if folders else None,
             "watched_folders": folders,
             "graph_nodes": G.number_of_nodes(),
@@ -396,10 +437,11 @@ def status(workspace_id: str | None = None):
         all_files = store.get_all_files()
         indexed = sum(1 for f in all_files if f.status == "done")
         failed = sum(1 for f in all_files if f.status == "failed")
+        vstore = vector_store_router.get_store()
         return {
             "indexed": indexed,
             "failed": failed,
-            "vectors": vector_store.count(),
+            "vectors": vstore.count(),
             "watched_folder": None,
             "watched_folders": [],
             "graph_nodes": 0,
@@ -415,7 +457,8 @@ def progress():
 
 @app.post("/search")
 def search(req: SearchRequest):
-    if vector_store.count() == 0:
+    vstore = vector_store_router.get_store(req.workspace_id)
+    if vstore.count() == 0:
         return {"nodes": [], "edges": [], "query": req.query, "ms": 0}
 
     import time
@@ -425,7 +468,10 @@ def search(req: SearchRequest):
     ws_files = store.get_files_for_workspace(req.workspace_id)
     ws_hashes = [f.hash for f in ws_files]
 
-    results = _search(req.query, G, n_results=req.limit, workspace_hashes=ws_hashes)
+    results = _search(
+        req.query, G, n_results=req.limit,
+        workspace_hashes=ws_hashes, workspace_id=req.workspace_id,
+    )
 
     seed_hashes = [r["hash"] for r in results]
     sub = subgraph_for_paths(G, seed_hashes, expand_depth=1)
@@ -508,10 +554,11 @@ def global_status():
     all_files = store.get_all_files()
     workspaces = store.list_workspaces()
     total_ws_files = sum(store.get_workspace_file_count(ws.id) for ws in workspaces)
+    vstore = vector_store_router.get_store()
     return {
         "total_files_indexed": len(all_files),
         "total_workspaces": len(workspaces),
-        "chroma_count": vector_store.count(),
+        "vector_count": vstore.count(),
         "dedup_savings": max(0, total_ws_files - len(all_files)),
     }
 
@@ -534,13 +581,25 @@ def list_workspaces():
             "folder_count": len(store.get_folders_for_workspace(ws.id)),
             "created_at": ws.created_at.isoformat() if ws.created_at else None,
             "last_opened": ws.last_opened.isoformat() if ws.last_opened else None,
+            "processing_path": getattr(ws, "processing_path", "hosted"),
+            "model_name": getattr(ws, "model_name", None),
+            "vector_backend": getattr(ws, "vector_backend", "moorcheh"),
         })
     return result
 
 
 @app.post("/workspaces")
 def create_workspace(req: CreateWorkspaceRequest):
-    ws = store.create_workspace(name=req.name, emoji=req.emoji, colour=req.colour)
+    ws = store.create_workspace(
+        name=req.name,
+        emoji=req.emoji,
+        colour=req.colour,
+        processing_path=req.processing_path,
+        model_name=req.model_name,
+        user_api_key=req.user_api_key,
+        user_api_base=req.user_api_base,
+        vector_backend=req.vector_backend,
+    )
     return {
         "id": ws.id,
         "name": ws.name,
@@ -550,6 +609,9 @@ def create_workspace(req: CreateWorkspaceRequest):
         "folder_count": 0,
         "created_at": ws.created_at.isoformat() if ws.created_at else None,
         "last_opened": ws.last_opened.isoformat() if ws.last_opened else None,
+        "processing_path": ws.processing_path,
+        "model_name": ws.model_name,
+        "vector_backend": ws.vector_backend,
     }
 
 
@@ -559,7 +621,7 @@ def update_workspace(workspace_id: str, req: UpdateWorkspaceRequest):
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
-    fields: dict[str, Any] = {"last_opened": datetime.utcnow()}
+    fields: dict[str, Any] = {"last_opened": datetime.now(timezone.utc)}
     if req.name is not None:
         fields["name"] = req.name
     if req.emoji is not None:
@@ -589,8 +651,9 @@ def delete_workspace(workspace_id: str):
     # Stop all watchers for this workspace
     _stop_all_watchers_for_workspace(workspace_id)
 
-    # Collect hashes to purge from ChromaDB (those that will become orphaned)
+    # Collect hashes to purge from vector store (those that will become orphaned)
     ws_files = store.get_files_for_workspace(workspace_id)
+    vstore = vector_store_router.get_store(workspace_id)
     will_orphan = [
         f.hash for f in ws_files
         if store.count_workspace_refs(f.hash) == 1  # only this workspace
@@ -600,14 +663,21 @@ def delete_workspace(workspace_id: str):
     # and deletes orphaned file_records)
     orphaned_count = store.delete_workspace(workspace_id)
 
-    # Purge orphaned hashes from ChromaDB
+    # Purge orphaned hashes from vector store
     for h in will_orphan:
-        vector_store.delete(h)
+        vstore.delete(h)
 
     # Remove workspace graph from cache
     import graph as _g
     _g._graphs.pop(workspace_id, None)
     _g._dirty.discard(workspace_id)
+
+    # Invalidate agent cache
+    try:
+        from agent import invalidate_agent
+        invalidate_agent(workspace_id)
+    except Exception:
+        pass
 
     return {"deleted": True, "files_purged": orphaned_count}
 
@@ -754,10 +824,65 @@ def update_settings(req: UpdateSettingsRequest):
     return updated
 
 
+@app.get("/settings/app")
+def get_app_settings():
+    """Check current global app settings status."""
+    key_set = bool(os.environ.get("MOORCHEH_API_KEY"))
+    connected = False
+    if key_set:
+        try:
+            from vector_store_moorcheh import ping as moorcheh_ping
+            moorcheh_ping()
+            connected = True
+        except Exception:
+            connected = False
+    return AppSettingsResponse(
+        moorcheh_api_key_set=key_set,
+        moorcheh_connected=connected,
+    )
+
+
+@app.post("/settings/app")
+def save_app_settings(request: AppSettingsRequest):
+    """
+    Save global app settings to ~/.bina/.env.
+    Rewrites the key in the .env file and hot-reloads into os.environ.
+    """
+    env_path = Path.home() / ".bina" / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+
+    if request.moorcheh_api_key is not None:
+        key_line = f"MOORCHEH_API_KEY={request.moorcheh_api_key}"
+        updated = False
+        for i, line in enumerate(lines):
+            if line.startswith("MOORCHEH_API_KEY="):
+                lines[i] = key_line
+                updated = True
+                break
+        if not updated:
+            lines.append(key_line)
+        os.environ["MOORCHEH_API_KEY"] = request.moorcheh_api_key
+
+    env_path.write_text("\n".join(lines) + "\n")
+
+    # Reset cached Moorcheh client so new key is picked up immediately
+    try:
+        from vector_store_moorcheh import reset_client as moorcheh_reset
+        moorcheh_reset()
+    except Exception:
+        pass
+
+    return {"saved": True}
+
+
 @app.delete("/index/clear")
 def clear_index():
-    """Wipe all indexed data — SQLite file records + ChromaDB vectors."""
-    # Stop all watchers before wiping (they'd fail on missing db)
+    """Wipe all indexed data — SQLite file records + vector store."""
+    # Stop all watchers before wiping
     with _watchers_lock:
         keys = list(_watchers.keys())
     for k in keys:
@@ -773,8 +898,9 @@ def clear_index():
         _g._graphs.clear()
         _g._dirty.clear()
 
-    # Wipe ChromaDB collection (delete + recreate)
-    vector_store.clear_all()
+    # Wipe vector store
+    vstore = vector_store_router.get_store()
+    vstore.clear_all()
 
     # Wipe SQLite: drop all tables and recreate schema
     import store as _store
@@ -800,11 +926,15 @@ def clear_index():
 
 import threading as _threading
 
-# Required models: name → display info
+try:
+    import ollama
+except ImportError:
+    ollama = None
+
+# Required models for local path only
 _REQUIRED_MODELS = [
-    {"name": "qwen3:4b",       "role": "Text understanding (LLM)",    "size_gb": 2.6},
-    {"name": "qwen2.5vl:3b",   "role": "Image understanding (Vision)", "size_gb": 3.2},
-    {"name": "nomic-embed-text","role": "Semantic embeddings",         "size_gb": 0.3},
+    {"name": "qwen3.5:2b",      "role": "Text & image understanding (multimodal)", "size_gb": 2.7},
+    {"name": "nomic-embed-text", "role": "Semantic embeddings",                     "size_gb": 0.3},
 ]
 
 # Pull progress store: model_name → {status, percent, total, completed, error}
@@ -815,15 +945,19 @@ _pull_lock = _threading.Lock()
 @app.get("/models/status")
 def get_models_status():
     """Check which required models are currently installed in Ollama."""
+    if ollama is None:
+        return {"error": "ollama not installed", "models": [], "all_ready": False}
     try:
         result = ollama.list()
-        installed_names = set()
-        for m in result.get("models", []):
-            # Normalize: "qwen3:4b" and "qwen3" both count
-            n = m.get("name", "") or m.get("model", "")
-            installed_names.add(n)
-            # Also add the base name (strip tag)
-            installed_names.add(n.split(":")[0])
+        raw_models = getattr(result, 'models', None)
+        if raw_models is None:
+            raw_models = result.get("models", []) if isinstance(result, dict) else []
+        installed_names: list[str] = []
+        for m in raw_models:
+            n = (getattr(m, 'name', None) or getattr(m, 'model', None)
+                 or m.get("name", "") or m.get("model", ""))
+            if n:
+                installed_names.append(n)
     except Exception as e:
         return {"error": str(e), "models": []}
 
@@ -831,7 +965,10 @@ def get_models_status():
     for req in _REQUIRED_MODELS:
         name = req["name"]
         base = name.split(":")[0]
-        installed = name in installed_names or base in installed_names
+        installed = any(
+            n == name or n.startswith(base + ":")
+            for n in installed_names
+        )
         models_out.append({
             "name": name,
             "role": req["role"],
@@ -844,6 +981,10 @@ def get_models_status():
 
 def _do_pull(model_name: str) -> None:
     """Background thread: stream pull progress from Ollama."""
+    if ollama is None:
+        with _pull_lock:
+            _pull_progress[model_name] = {"status": "error", "percent": 0, "error": "ollama not installed"}
+        return
     with _pull_lock:
         _pull_progress[model_name] = {"status": "pulling", "percent": 0, "error": None}
     try:
@@ -870,7 +1011,7 @@ def _do_pull(model_name: str) -> None:
 
 @app.post("/models/pull/{model_name:path}")
 def pull_model(model_name: str):
-    """Start pulling a model in the background. Poll /models/pull-progress/{name} for updates."""
+    """Start pulling a model in the background."""
     with _pull_lock:
         existing = _pull_progress.get(model_name, {})
         if existing.get("status") in ("pulling", "downloading manifest"):
@@ -889,9 +1030,89 @@ def get_pull_progress(model_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Routes — query (agent / search)
+# ---------------------------------------------------------------------------
+
+@app.post("/query")
+def query(req: QueryRequest):
+    """
+    Unified query endpoint.
+    mode="agent": semantic search + LLM synthesis using workspace's AI config
+    mode="search": direct vector search only (returns raw graph nodes)
+    """
+    try:
+        from agent import answer_query as _answer_query, semantic_search as _sem_search
+
+        if req.mode == "search":
+            top_hits = _sem_search(req.query, req.workspace_id, top_k=20)
+            return {
+                "answer": None,
+                "results": top_hits[:10],
+                "mode": "search",
+                "workspace_id": req.workspace_id,
+            }
+
+        # Agent mode: search relevant files then synthesise an answer with the LLM.
+        # Uses workspace's processing_path (hosted / local / user_api) automatically.
+        answer = _answer_query(req.query, req.workspace_id)
+        top_hits = _sem_search(req.query, req.workspace_id, top_k=5)
+        return {
+            "answer": answer,
+            "results": top_hits,
+            "mode": "agent",
+            "workspace_id": req.workspace_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Query failed: {e}")
+        raise HTTPException(500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Routes — workspace model configuration
+# ---------------------------------------------------------------------------
+
+@app.get("/workspaces/{workspace_id}/model")
+def get_workspace_model(workspace_id: str):
+    ws = store.get_workspace(workspace_id)
+    if not ws:
+        raise HTTPException(404, "Workspace not found")
+    return {
+        "processing_path": getattr(ws, "processing_path", "hosted"),
+        "model_name": getattr(ws, "model_name", None),
+        "embed_model": getattr(ws, "embed_model", "nomic-embed-text"),
+        "vector_backend": getattr(ws, "vector_backend", "moorcheh"),
+        "has_user_api_key": bool(getattr(ws, "user_api_key", None)),
+    }
+
+
+@app.patch("/workspaces/{workspace_id}/model")
+def update_workspace_model(workspace_id: str, config: WorkspaceModelConfig):
+    ws = store.get_workspace(workspace_id)
+    if not ws:
+        raise HTTPException(404, "Workspace not found")
+
+    fields = {k: v for k, v in config.model_dump().items() if v is not None}
+    ws = store.update_workspace(workspace_id, **fields)
+
+    # Invalidate cached agent so it rebuilds with new config
+    try:
+        from agent import invalidate_agent
+        invalidate_agent(workspace_id)
+    except Exception:
+        pass
+
+    return {
+        "processing_path": ws.processing_path,
+        "model_name": ws.model_name,
+        "embed_model": ws.embed_model,
+        "vector_backend": ws.vector_backend,
+    }
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
-
