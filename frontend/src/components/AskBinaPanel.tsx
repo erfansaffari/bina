@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { Brain, FileText } from 'lucide-react'
 import { api } from '../api'
 import { useAppStore } from '../store/appStore'
 import type { QueryResult } from '../types'
@@ -120,7 +121,9 @@ export default function AskBinaPanel({ workspaceId }: Props) {
       <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-4">
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in">
-            <div className="text-4xl mb-3">🧠</div>
+            <div className="mb-3 text-bina-accent">
+              <Brain className="w-10 h-10 mx-auto" strokeWidth={1.5} />
+            </div>
             <p className="text-bina-text text-lg font-display font-semibold">Ask Bina</p>
             <p className="text-bina-muted text-sm mt-1 max-w-xs">
               Ask questions about your files. Bina will search your knowledge graph and reason over your documents.
@@ -163,14 +166,14 @@ export default function AskBinaPanel({ workspaceId }: Props) {
                       className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-bina-accent/10 text-bina-accent cursor-pointer hover:bg-bina-accent/20 transition-colors"
                       title={s.path}
                     >
-                      📄 {s.name}
+                      <FileText className="w-2.5 h-2.5 flex-shrink-0" /> {s.name}
                     </span>
                   ))}
                 </div>
               )}
               {msg.mode && msg.mode !== 'agent' && (
                 <span className="inline-block mt-1 text-[10px] text-bina-muted/60">
-                  {msg.mode === 'fallback' ? '⚡ direct search' : msg.mode}
+                  {msg.mode === 'fallback' ? 'direct search' : msg.mode}
                 </span>
               )}
             </div>

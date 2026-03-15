@@ -14,8 +14,8 @@ html, body, #root {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background: #0d0d0f;
-  color: #f0f0f2;
+  background: linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 40%, #FDF2F8 100%);
+  color: #1E1B4B;
   user-select: none;
 }
 
@@ -29,8 +29,8 @@ html, body, #root {
 /* Scrollbars */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #3a3a40; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #5a5a62; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
 
 /* Graph canvas */
 canvas { display: block; }
@@ -43,4 +43,62 @@ canvas { display: block; }
 /* Shared button style */
 .btn-primary {
   @apply inline-flex items-center justify-center gap-1.5 bg-bina-accent hover:bg-bina-accent/80 active:scale-95 text-white text-sm font-medium px-6 py-3 rounded-2xl transition-all duration-150 cursor-pointer;
+}
+
+/* Frosted glass card utility */
+.glass {
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(16px) saturate(1.6);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  border: 1px solid rgba(99, 102, 241, 0.12);
+  box-shadow: 0 4px 24px rgba(99, 102, 241, 0.08), 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* Floating background orbs — more visible */
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  pointer-events: none;
+  opacity: 0.48;
+}
+.orb-1 {
+  width: 560px;
+  height: 560px;
+  background: radial-gradient(circle, #C7D2FE 0%, #818CF8 60%, transparent 100%);
+  top: -140px;
+  left: -100px;
+  animation: orbFloat 12s ease-in-out infinite;
+}
+.orb-2 {
+  width: 460px;
+  height: 460px;
+  background: radial-gradient(circle, #FBCFE8 0%, #F472B6 60%, transparent 100%);
+  bottom: -100px;
+  right: 8%;
+  animation: orbFloat2 16s ease-in-out infinite;
+}
+.orb-3 {
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, #A7F3D0 0%, #34D399 60%, transparent 100%);
+  bottom: 25%;
+  left: 32%;
+  animation: orbFloat3 20s ease-in-out infinite;
+}
+
+@keyframes orbFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%       { transform: translate(30px, -40px) scale(1.05); }
+  66%       { transform: translate(-20px, 20px) scale(0.97); }
+}
+@keyframes orbFloat2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  40%      { transform: translate(-40px, 30px) scale(1.08); }
+  70%      { transform: translate(25px, -20px) scale(0.95); }
+}
+@keyframes orbFloat3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25%      { transform: translate(20px, 40px) scale(1.04); }
+  75%      { transform: translate(-30px, -25px) scale(0.98); }
 }

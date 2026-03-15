@@ -22,25 +22,30 @@ interface Props {
 }
 
 export default function Inspector({ node, open, onClose }: Props) {
-  if (!open || !node) return null
+  const isVisible = open && !!node
 
-  const docType  = node.doc_type ?? 'Unknown'
-  const summary  = node.summary  ?? ''
-  const keywords = (node.keywords ?? []).map(kw => String(kw)).filter(Boolean)
-  const entities = node.entities ?? {}
-  const path     = node.path     ?? node.id ?? ''
+  const docType  = node?.doc_type ?? 'Unknown'
+  const summary  = node?.summary  ?? ''
+  const keywords = (node?.keywords ?? []).map(kw => String(kw)).filter(Boolean)
+  const entities = node?.entities ?? {}
+  const path     = node?.path     ?? node?.id ?? ''
 
-  const typeClass    = TYPE_COLORS[docType] ?? TYPE_COLORS['Other']
-  const hasEntities  = Object.values(entities).some(arr => Array.isArray(arr) && arr.length > 0)
+  const typeClass   = TYPE_COLORS[docType] ?? TYPE_COLORS['Other']
+  const hasEntities = Object.values(entities).some(arr => Array.isArray(arr) && arr.length > 0)
 
   return (
     <div
-      className="w-80 flex-shrink-0 border-l border-bina-border bg-bina-surface/60 backdrop-blur-sm flex flex-col panel-transition animate-slide-up overflow-hidden"
+      className={`flex-shrink-0 border-l border-bina-border glass flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${
+        isVisible ? 'w-80 opacity-100' : 'w-0 opacity-0 pointer-events-none'
+      }`}
     >
+      {/* Minimum width wrapper prevents reflow of inner content during animation */}
+      <div className="w-80 flex flex-col flex-1 overflow-hidden">
+
       {/* Header */}
       <div className="flex items-center justify-between px-5 pt-14 pb-4 border-b border-bina-border">
         <h3 className="text-bina-text font-medium text-sm truncate flex-1 mr-2">
-          {node.label}
+          {node?.label}
         </h3>
         <button
           onClick={onClose}
@@ -58,12 +63,12 @@ export default function Inspector({ node, open, onClose }: Props) {
           <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${typeClass}`}>
             {docType}
           </span>
-          {node.score > 0 && (
+          {(node?.score ?? 0) > 0 && (
             <span className="text-xs text-bina-muted">
-              {Math.round(node.score * 100)}% match
+              {Math.round((node?.score ?? 0) * 100)}% match
             </span>
           )}
-          {node.status === 'failed' && (
+          {node?.status === 'failed' && (
             <span className="text-xs bg-bina-red/20 text-bina-red px-2.5 py-1 rounded-full">
               Not analysed
             </span>
@@ -76,7 +81,7 @@ export default function Inspector({ node, open, onClose }: Props) {
             <p className="text-xs font-medium text-bina-muted uppercase tracking-wider mb-2">Preview</p>
             <img
               src={`file://${path}`}
-              alt={node.label}
+              alt={node?.label}
               className="w-full rounded-xl object-cover max-h-48 border border-bina-border"
               onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
             />
@@ -151,20 +156,22 @@ export default function Inspector({ node, open, onClose }: Props) {
       {/* Actions */}
       <div className="px-5 py-4 border-t border-bina-border space-y-2">
         <button
-          onClick={() => openFile(node.path)}
+          onClick={() => node && openFile(node.path)}
           className="w-full flex items-center justify-center gap-2 bg-bina-accent hover:bg-bina-accent/80 text-white text-sm font-medium rounded-xl py-2.5 transition-colors"
         >
           <ExternalLink className="w-4 h-4" />
           Open File
         </button>
         <button
-          onClick={() => showInFinder(node.path)}
+          onClick={() => node && showInFinder(node.path)}
           className="w-full flex items-center justify-center gap-2 bg-bina-border/60 hover:bg-bina-border text-bina-text/80 text-sm font-medium rounded-xl py-2.5 transition-colors"
         >
           <Folder className="w-4 h-4" />
           Show in Finder
         </button>
       </div>
+
+      </div>{/* end w-80 wrapper */}
     </div>
   )
 }

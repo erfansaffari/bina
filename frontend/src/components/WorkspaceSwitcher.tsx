@@ -17,7 +17,7 @@ export default function WorkspaceSwitcher({ onCreateWorkspace, onEditWorkspace }
     setActiveWorkspace(ws.id)
     try {
       await workspacesApi.update(ws.id, {})
-      await loadWorkspaces()
+      // Don't reload — would reorder workspaces by last_opened
     } catch {}
   }
 
@@ -44,8 +44,19 @@ export default function WorkspaceSwitcher({ onCreateWorkspace, onEditWorkspace }
 
   return (
     <div className="w-16 flex-shrink-0 flex flex-col items-center py-3 gap-2 border-r border-bina-border bg-bina-surface/60 backdrop-blur-sm">
+      {/* App logo — at top, below traffic lights */}
+      <div className="flex-shrink-0 pt-10 pb-1">
+        <img
+          src="/logo.png"
+          alt="Bina"
+          className="w-8 h-8 rounded-lg object-contain select-none"
+          draggable={false}
+        />
+      </div>
+      <div className="w-8 h-px bg-bina-border flex-shrink-0" />
+
       {/* Workspaces list */}
-      <div className="flex flex-col items-center gap-2 flex-1 overflow-y-auto w-full px-2 scrollbar-hide">
+      <div className="flex flex-col items-center gap-2 flex-1 overflow-y-auto overflow-x-hidden w-full px-2 scrollbar-hide">
         {workspaces.map((ws) => {
           const isActive = ws.id === activeWorkspaceId
           const isDeleting = deleting === ws.id

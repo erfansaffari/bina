@@ -14,10 +14,16 @@ import type { GraphNode, GraphEdge } from '../types'
 import { openFile, showInFinder, api } from '../api'
 import { useAppStore } from '../store/appStore'
 
-// ── Palette ───────────────────────────────────────────────────────────────────
+// ── Spring palette ─────────────────────────────────────────────────────────────
 const COMMUNITY_PALETTE = [
-  '#5e7ce6', '#0d9488', '#d97706', '#dc2626',
-  '#7c3aed', '#db2777', '#16a34a', '#0891b2',
+  '#6366F1', // indigo
+  '#F43F5E', // rose
+  '#10B981', // emerald
+  '#8B5CF6', // violet
+  '#3B82F6', // blue
+  '#F59E0B', // amber
+  '#06B6D4', // cyan
+  '#EC4899', // pink
 ]
 function communityColor(id: number) {
   return COMMUNITY_PALETTE[(id ?? 0) % COMMUNITY_PALETTE.length]
@@ -132,17 +138,17 @@ function CommunityLegend({
   focusedGroup: number | null
   onGroupClick: (id: number | null) => void
 }) {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(true)
   if (groups.length === 0) return null
   return (
     <div className="absolute bottom-4 left-4 z-20 select-none">
-      <div className="bg-black/70 backdrop-blur-md border border-white/10 rounded-xl overflow-hidden shadow-2xl">
+      <div className="glass rounded-xl overflow-hidden shadow-lg">
         <button
-          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-white/60 hover:text-white/90 transition-colors"
+          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-bina-muted hover:text-bina-text transition-colors"
           onClick={() => setCollapsed(c => !c)}
         >
           <span className="font-semibold tracking-wide uppercase text-[10px]">Groups</span>
-          <svg className={`ml-auto w-3 h-3 transition-transform ${collapsed ? '' : 'rotate-180'}`} viewBox="0 0 12 12" fill="none">
+          <svg className={`ml-auto w-3 h-3 transition-transform ${collapsed ? 'rotate-180' : ''}`} viewBox="0 0 12 12" fill="none">
             <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           </svg>
         </button>
@@ -153,15 +159,15 @@ function CommunityLegend({
               return (
                 <button
                   key={g.id}
-                  className={`flex items-center gap-2 w-full text-left px-2 py-1 rounded-lg transition-colors ${isFocused ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                  className={`flex items-center gap-2 w-full text-left px-2 py-1 rounded-lg transition-colors ${isFocused ? 'bg-bina-accent/10' : 'hover:bg-bina-accent/5'}`}
                   onClick={() => onGroupClick(isFocused ? null : g.id)}
                 >
                   <div
                     className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                     style={{ backgroundColor: communityColor(g.id), boxShadow: isFocused ? `0 0 6px ${communityColor(g.id)}` : undefined }}
                   />
-                  <span className={`text-[11px] whitespace-nowrap ${isFocused ? 'text-white' : 'text-white/70'}`}>{g.label}</span>
-                  <span className="text-[10px] text-white/30 ml-auto">{g.count}</span>
+                  <span className={`text-[11px] whitespace-nowrap ${isFocused ? 'text-bina-text font-medium' : 'text-bina-muted'}`}>{g.label}</span>
+                  <span className="text-[10px] text-bina-muted/50 ml-auto">{g.count}</span>
                 </button>
               )
             })}
@@ -223,13 +229,6 @@ export default function GraphCanvas({
   const adjRef            = useRef(new Map<string, Set<string>>())
   const degreeMapRef      = useRef(new Map<string, number>())
 
-  useEffect(() => { focusedGroupRef.current   = focusedGroup  }, [focusedGroup])
-  useEffect(() => { onNodeClickRef.current    = onNodeClick   }, [onNodeClick])
-  useEffect(() => { onNodeDeletedRef.current  = onNodeDeleted }, [onNodeDeleted])
-  useEffect(() => { dimsRef.current           = dims          }, [dims])
-  useEffect(() => { selectedNodeIdRef.current = selectedNodeId }, [selectedNodeId])
-  useEffect(() => { searchScoresRef.current   = searchScores  }, [searchScores])
-
   const dragNodeRef    = useRef<SimNode | null>(null)
   const dragStartRef   = useRef<{ x: number; y: number } | null>(null)
   const dragMovedRef   = useRef(false)
@@ -239,7 +238,24 @@ export default function GraphCanvas({
   const lastClickRef   = useRef<string | null>(null)
   const smoothAnimRef  = useRef<number>(0)
 
+  // Imperative tooltip ref — updated directly to avoid React re-renders on every mouse move
+  const tooltipRef = useRef<HTMLDivElement>(null)
+
   const groupTargetsRef = useRef(new Map<number, { x: number; y: number }>())
+
+  // Hub overview mode — declared before useEffects to avoid TDZ
+  const [graphViewMode, setGraphViewMode] = useState<'hub' | 'all'>('hub')
+  const graphViewModeRef = useRef<'hub' | 'all'>('hub')
+  const groupListRef     = useRef<{ id: number; label: string; count: number }[]>([])
+  const hubRectsRef      = useRef(new Map<number, { x: number; y: number; r: number }>())
+
+  useEffect(() => { focusedGroupRef.current   = focusedGroup  }, [focusedGroup])
+  useEffect(() => { onNodeClickRef.current    = onNodeClick   }, [onNodeClick])
+  useEffect(() => { onNodeDeletedRef.current  = onNodeDeleted }, [onNodeDeleted])
+  useEffect(() => { dimsRef.current           = dims          }, [dims])
+  useEffect(() => { selectedNodeIdRef.current = selectedNodeId }, [selectedNodeId])
+  useEffect(() => { searchScoresRef.current   = searchScores  }, [searchScores])
+  useEffect(() => { graphViewModeRef.current  = graphViewMode }, [graphViewMode])
 
   // ── Group list ────────────────────────────────────────────────────────────
   const groupList = useMemo(() => {
@@ -253,6 +269,9 @@ export default function GraphCanvas({
       .map(([id, d]) => ({ id, label: d.label, count: d.count }))
       .sort((a, b) => b.count - a.count)
   }, [nodes])
+
+  // Keep ref in sync — must be after groupList useMemo to avoid TDZ
+  useEffect(() => { groupListRef.current = groupList }, [groupList])
 
   useEffect(() => {
     const { w, h } = dimsRef.current
@@ -322,6 +341,18 @@ export default function GraphCanvas({
     return null
   }
 
+  function findHubAt(cx: number, cy: number): number | null {
+    const canvas = canvasRef.current; if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const { k, x: tx, y: ty } = transformRef.current
+    const wx = (cx - rect.left - tx) / k, wy = (cy - rect.top - ty) / k
+    for (const [gid, hub] of hubRectsRef.current.entries()) {
+      const dx = wx - hub.x, dy = wy - hub.y
+      if (dx * dx + dy * dy <= hub.r * hub.r) return gid
+    }
+    return null
+  }
+
   // ── Canvas render ─────────────────────────────────────────────────────────
   const render = useCallback(() => {
     const canvas = canvasRef.current; if (!canvas) return
@@ -342,6 +373,55 @@ export default function GraphCanvas({
     ctx.scale(dpr, dpr)
     ctx.translate(tx, ty)
     ctx.scale(k, k)
+
+    // ── Hub overview mode ─────────────────────────────────────────────────
+    if (graphViewModeRef.current === 'hub') {
+      const targets = groupTargetsRef.current
+      const groups  = groupListRef.current
+      hubRectsRef.current.clear()
+
+      groups.forEach(g => {
+        const pos = targets.get(g.id)
+        if (!pos) return
+
+        const r     = Math.max(30, Math.min(72, 22 + Math.sqrt(g.count) * 5.5))
+        const color = communityColor(g.id)
+
+        // 3D sphere effect — off-center highlight
+        const grad = ctx.createRadialGradient(
+          pos.x - r * 0.28, pos.y - r * 0.28, r * 0.08,
+          pos.x, pos.y, r,
+        )
+        grad.addColorStop(0,   'rgba(255,255,255,0.65)')
+        grad.addColorStop(0.35, hexAlpha(color, 0.88))
+        grad.addColorStop(1,   hexAlpha(color, 0.55))
+
+        // Shadow
+        ctx.shadowColor = hexAlpha(color, 0.3)
+        ctx.shadowBlur  = 20
+        ctx.beginPath(); ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2)
+        ctx.fillStyle = grad; ctx.fill()
+        ctx.shadowBlur = 0
+
+        // Rim stroke
+        ctx.strokeStyle = hexAlpha(color, 0.35)
+        ctx.lineWidth   = 1.5; ctx.stroke()
+
+        // Labels
+        ctx.textAlign = 'center'; ctx.textBaseline = 'top'
+        const labelY = pos.y + r + 10
+        ctx.font      = `600 13px -apple-system, BlinkMacSystemFont, sans-serif`
+        ctx.fillStyle = '#1E1B4B'
+        ctx.fillText(g.label, pos.x, labelY)
+        ctx.font      = `400 11px -apple-system, BlinkMacSystemFont, sans-serif`
+        ctx.fillStyle = '#6B7280'
+        ctx.fillText(`${g.count} files`, pos.x, labelY + 17)
+
+        hubRectsRef.current.set(g.id, { x: pos.x, y: pos.y, r })
+      })
+
+      ctx.restore(); return
+    }
 
     // ── Compute cluster metrics (centroid + radius per cluster) ───────────
     const cMetrics = new Map<string, { cx: number; cy: number; r: number; groupId: number; count: number }>()
@@ -420,16 +500,16 @@ export default function GraphCanvas({
       const isOther = scores === null && focusedG !== null && !isFocus
 
       ctx.save()
-      ctx.globalAlpha = isOther ? 0.03 : isFocus ? 0.13 : 0.07
+      ctx.globalAlpha = isOther ? 0.03 : isFocus ? 0.10 : 0.06
       ctx.beginPath(); ctx.arc(c.cx, c.cy, c.r, 0, Math.PI * 2)
       ctx.fillStyle = color; ctx.fill()
 
-      ctx.globalAlpha = isOther ? 0.04 : isFocus ? 0.55 : 0.2
+      ctx.globalAlpha = isOther ? 0.05 : isFocus ? 0.50 : 0.18
       ctx.strokeStyle = color; ctx.lineWidth = isFocus ? 1.5 : 1
       if (!isFocus) ctx.setLineDash([5, 6])
       ctx.stroke(); ctx.setLineDash([])
 
-      ctx.globalAlpha = isOther ? 0.08 : isFocus ? 0.9 : 0.45
+      ctx.globalAlpha = isOther ? 0.10 : isFocus ? 0.85 : 0.50
       const fs = Math.max(9, Math.min(13, 11 / Math.max(k * 0.5, 0.3)))
       ctx.font = `600 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
       ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
@@ -468,7 +548,7 @@ export default function GraphCanvas({
 
       // Regular edge
       const cross = (s.community_id ?? 0) !== (t.community_id ?? 0)
-      let alpha = cross ? 0.06 + link.weight * 0.08 : 0.15 + link.weight * 0.4
+      let alpha = cross ? 0.28 + link.weight * 0.18 : 0.55 + link.weight * 0.35
 
       // Search mode takes priority over group focus (same mutual exclusion as nodes)
       if (scores !== null) {
@@ -628,9 +708,17 @@ export default function GraphCanvas({
       ctx.beginPath(); ctx.arc(node.x, node.y, rBoost, 0, Math.PI * 2)
       if (isSel) {
         ctx.fillStyle = '#ffffff'; ctx.fill()
-        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke()
+        ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.stroke()
       } else {
         ctx.fillStyle = color; ctx.fill()
+        // Subtle white inner highlight for depth
+        const shine = ctx.createRadialGradient(
+          node.x - rBoost * 0.25, node.y - rBoost * 0.25, rBoost * 0.05,
+          node.x, node.y, rBoost
+        )
+        shine.addColorStop(0, 'rgba(255,255,255,0.28)')
+        shine.addColorStop(1, 'rgba(255,255,255,0)')
+        ctx.fillStyle = shine; ctx.fill()
       }
 
       // Show label: hover/selected, group focus members, or search matches
@@ -641,14 +729,19 @@ export default function GraphCanvas({
         const fs    = Math.max(10, Math.min(13, 12 / Math.max(k * 0.6, 0.4)))
         ctx.font = `500 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
         ctx.textAlign = 'center'; ctx.textBaseline = 'top'
-        const labelY = node.y + r + 5 / Math.max(k, 0.5)
+        const labelY = node.y + rBoost + 5 / Math.max(k, 0.5)
         const tw     = ctx.measureText(label).width
         const pad    = 4
-        ctx.fillStyle = 'rgba(10,10,14,0.88)'
+        // White frosted backdrop
+        ctx.fillStyle = 'rgba(255,255,255,0.92)'
+        ctx.shadowColor = 'rgba(99,102,241,0.12)'
+        ctx.shadowBlur  = 4
         ctx.beginPath()
         ctx.roundRect(node.x - tw / 2 - pad, labelY - 1, tw + pad * 2, fs + 4, 4)
         ctx.fill()
-        ctx.fillStyle = isSel ? '#ffffff' : hexAlpha(color, 0.95)
+        ctx.shadowBlur = 0
+        // Dark ink text
+        ctx.fillStyle = '#1E1B4B'
         ctx.fillText(label, node.x, labelY)
       }
 
@@ -690,6 +783,16 @@ export default function GraphCanvas({
     const targetK = Math.min(transformRef.current.k * 1.15, 3.5)
     smoothTo(w / 2 - cx * targetK, h / 2 - cy * targetK, targetK, 600)
   }
+
+  // Pause simulation in hub mode, resume in all mode
+  useEffect(() => {
+    if (!simRef.current) return
+    if (graphViewMode === 'hub') {
+      simRef.current.stop()
+    } else {
+      simRef.current.alpha(0.15).restart()
+    }
+  }, [graphViewMode])
 
   // ── D3 simulation ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -788,7 +891,7 @@ export default function GraphCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges])
 
-  useEffect(() => { render() }, [searchScores, selectedNodeId, render])
+  useEffect(() => { render() }, [searchScores, selectedNodeId, graphViewMode, render])
 
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
@@ -823,19 +926,26 @@ export default function GraphCanvas({
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return
-    const node = findNodeAt(e.clientX, e.clientY)
-    if (node) {
-      dragNodeRef.current  = node
-      dragStartRef.current = { x: e.clientX, y: e.clientY }
-      dragMovedRef.current = false
-      node.fx = node.x; node.fy = node.y
-      setCursor('grabbing')
-    } else {
+    dragMovedRef.current = false
+    // In hub mode, only allow panning (no node dragging)
+    if (graphViewModeRef.current === 'hub') {
       isPanningRef.current = true
       panStartRef.current  = { x: e.clientX, y: e.clientY, tx: transformRef.current.x, ty: transformRef.current.y }
       dragStartRef.current = { x: e.clientX, y: e.clientY }
-      dragMovedRef.current = false
       setCursor('grabbing')
+    } else {
+      const node = findNodeAt(e.clientX, e.clientY)
+      if (node) {
+        dragNodeRef.current  = node
+        dragStartRef.current = { x: e.clientX, y: e.clientY }
+        node.fx = node.x; node.fy = node.y
+        setCursor('grabbing')
+      } else {
+        isPanningRef.current = true
+        panStartRef.current  = { x: e.clientX, y: e.clientY, tx: transformRef.current.x, ty: transformRef.current.y }
+        dragStartRef.current = { x: e.clientX, y: e.clientY }
+        setCursor('grabbing')
+      }
     }
     ;(e.currentTarget as HTMLCanvasElement).setPointerCapture(e.pointerId)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -861,6 +971,14 @@ export default function GraphCanvas({
       transformRef.current = { x: tx + dx, y: ty + dy, k: transformRef.current.k }
       render(); return
     }
+    // Hub mode — only check hub hit-testing
+    if (graphViewModeRef.current === 'hub') {
+      const hub = findHubAt(e.clientX, e.clientY)
+      setCursor(hub !== null ? 'pointer' : 'default')
+      if (tooltipRef.current) tooltipRef.current.style.display = 'none'
+      return
+    }
+
     // Hover — check close buttons, collapsed clusters, then nodes
     const closeBtn = findCollapseButtonAt(e.clientX, e.clientY)
     if (closeBtn) { setCursor('pointer'); return }
@@ -876,12 +994,52 @@ export default function GraphCanvas({
       setCursor(node ? 'pointer' : (cl ? 'pointer' : 'default'))
       render()
     }
+
+    // Update glass tooltip imperatively — no React re-render on every mouse move
+    const tip = tooltipRef.current
+    if (tip) {
+      if (node && node.summary) {
+        const summary = node.summary
+        // Truncate to first 2 sentences
+        const sentences = summary.split(/(?<=[.!?])\s+/)
+        const short = sentences.slice(0, 2).join(' ')
+        const name = tip.querySelector<HTMLElement>('.tip-name')
+        const body = tip.querySelector<HTMLElement>('.tip-body')
+        if (name) name.textContent = (node.label || node.name || '').replace(/\.[^.]+$/, '')
+        if (body) body.textContent = short.length < summary.length ? short + '\u2026' : short
+        // Position near cursor, keep within viewport
+        const rect = containerRef.current?.getBoundingClientRect()
+        if (rect) {
+          const tx = e.clientX - rect.left + 16
+          const ty = e.clientY - rect.top  - 10
+          tip.style.left    = `${Math.min(tx, rect.width  - 240)}px`
+          tip.style.top     = `${Math.max(0, Math.min(ty, rect.height - 80))}px`
+          tip.style.display = 'block'
+        }
+      } else {
+        tip.style.display = 'none'
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [render])
 
   const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     ;(e.currentTarget as HTMLCanvasElement).releasePointerCapture(e.pointerId)
     isPanningRef.current = false
+
+    // Hub mode — click on a hub expands to All Files view, focused on that group
+    if (graphViewModeRef.current === 'hub' && !dragMovedRef.current) {
+      const hubId = findHubAt(e.clientX, e.clientY)
+      dragNodeRef.current = null
+      dragMovedRef.current = false
+      if (hubId !== null) {
+        setGraphViewMode('all')
+        setFocusedGroup(hubId)
+        focusedGroupRef.current = hubId
+        simRef.current?.alpha(0.4).restart()
+      }
+      setCursor('default'); return
+    }
 
     const node  = dragNodeRef.current
     const moved = dragMovedRef.current
@@ -952,6 +1110,7 @@ export default function GraphCanvas({
     dragNodeRef.current    = null
     hoveredNodeRef.current = null
     hoveredClusterRef.current = null
+    if (tooltipRef.current) tooltipRef.current.style.display = 'none'
     setCursor('default'); render()
   }, [render])
 
@@ -994,7 +1153,7 @@ export default function GraphCanvas({
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div ref={containerRef} className="w-full h-full relative" style={{ background: '#0c0c0f' }}>
+    <div ref={containerRef} className="w-full h-full relative" style={{ background: '#FAFBFF' }}>
 
       <canvas
         ref={canvasRef}
@@ -1007,14 +1166,56 @@ export default function GraphCanvas({
         onContextMenu={handleContextMenu}
       />
 
+      {/* Overview / All Files toggle */}
+      <div className="absolute top-3 right-3 z-20 no-drag flex glass rounded-full p-1 gap-0.5 shadow-md select-none">
+        <button
+          onClick={() => setGraphViewMode('hub')}
+          className={`px-3 py-1 text-xs font-medium rounded-full transition-all duration-200 ${
+            graphViewMode === 'hub'
+              ? 'bg-bina-accent text-white shadow-sm'
+              : 'text-bina-muted hover:text-bina-text'
+          }`}
+        >
+          Overview
+        </button>
+        <button
+          onClick={() => setGraphViewMode('all')}
+          className={`px-3 py-1 text-xs font-medium rounded-full transition-all duration-200 ${
+            graphViewMode === 'all'
+              ? 'bg-bina-accent text-white shadow-sm'
+              : 'text-bina-muted hover:text-bina-text'
+          }`}
+        >
+          All Files
+        </button>
+      </div>
+
+      {/* Glass tooltip — populated imperatively, no React re-render on hover */}
+      <div
+        ref={tooltipRef}
+        className="glass pointer-events-none"
+        style={{
+          display: 'none',
+          position: 'absolute',
+          zIndex: 30,
+          maxWidth: 224,
+          padding: '8px 12px',
+          borderRadius: 12,
+          boxShadow: '0 4px 20px rgba(99,102,241,0.1)',
+        }}
+      >
+        <p className="tip-name text-bina-text text-xs font-semibold truncate mb-1" />
+        <p className="tip-body text-bina-muted text-[11px] leading-relaxed" style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }} />
+      </div>
+
       {/* Group focus breadcrumb */}
       {focusedGroupLabel && focusedGroup !== null && (
         <div className="absolute top-4 left-4 z-20 select-none animate-fade-in">
-          <div className="bg-black/70 backdrop-blur-md border border-white/10 rounded-xl px-3.5 py-2 shadow-2xl flex items-center gap-2">
+          <div className="glass rounded-xl px-3.5 py-2 shadow-lg flex items-center gap-2">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: communityColor(focusedGroup) }} />
-            <span className="text-white/80 text-sm font-medium">{focusedGroupLabel}</span>
+            <span className="text-bina-text text-sm font-medium">{focusedGroupLabel}</span>
             <button
-              className="ml-2 text-white/30 hover:text-white/70 text-xs transition-colors"
+              className="ml-2 text-bina-muted hover:text-bina-text text-xs transition-colors"
               onClick={() => { setFocusedGroup(null); render() }}
             >
               ✕
@@ -1041,41 +1242,41 @@ export default function GraphCanvas({
           <>
             <div className="fixed inset-0 z-40" onClick={() => setCtxMenu(null)} />
             <div
-              className="fixed z-50 bg-bina-surface border border-bina-border rounded-xl shadow-2xl py-1.5 min-w-[180px] overflow-hidden animate-fade-in"
+              className="fixed z-50 glass rounded-xl shadow-xl py-1.5 min-w-[180px] overflow-hidden animate-fade-in"
               style={{ left: ctxMenu.x, top: ctxMenu.y }}
             >
-              <div className="px-3 py-1.5 border-b border-bina-border/50 mb-1">
+              <div className="px-3 py-1.5 border-b border-bina-border mb-1">
                 <p className="text-bina-text text-xs font-medium truncate max-w-[160px]">
                   {ctxMenu.node.name || ctxMenu.node.label}
                 </p>
                 <p className="text-bina-muted text-[10px]">{ctxMenu.node.doc_type}</p>
               </div>
               <button
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-border/40 transition-colors text-left"
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-accent/8 transition-colors text-left"
                 onClick={() => { setCtxMenu(null); openFile(ctxMenu.node.path) }}
               >
                 Open file
               </button>
               <button
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-border/40 transition-colors text-left"
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-text hover:bg-bina-accent/8 transition-colors text-left"
                 onClick={() => { setCtxMenu(null); showInFinder(ctxMenu.node.path) }}
               >
                 Show in Finder
               </button>
               {canCollapse && (
                 <>
-                  <div className="h-px bg-bina-border/50 my-1" />
+                  <div className="h-px bg-bina-border my-1" />
                   <button
-                    className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-white/60 hover:bg-bina-border/40 transition-colors text-left"
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-muted hover:bg-bina-accent/8 transition-colors text-left"
                     onClick={() => { collapseCluster(nodeClusterId!); setCtxMenu(null) }}
                   >
                     Collapse sub-group
                   </button>
                 </>
               )}
-              <div className="h-px bg-bina-border/50 my-1" />
+              <div className="h-px bg-bina-border my-1" />
               <button
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors text-left"
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-bina-red hover:bg-red-500/10 transition-colors text-left"
                 onClick={() => handleRemoveFromBina(ctxMenu.node)}
               >
                 Remove from Bina

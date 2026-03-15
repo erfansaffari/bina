@@ -35,10 +35,10 @@ export default function SearchBar({ onSearch, searchMs }: Props) {
 
   return (
     <div
-      className={`flex items-center gap-3 bg-bina-surface border rounded-2xl px-4 py-3 transition-all duration-200 ${
+      className={`flex items-center gap-3 glass rounded-full px-4 py-2.5 transition-all duration-200 ${
         focused
-          ? 'border-bina-accent/60 shadow-lg shadow-bina-accent/10'
-          : 'border-bina-border'
+          ? 'ring-2 ring-bina-accent/30 shadow-lg shadow-bina-accent/10'
+          : ''
       }`}
     >
       <Search

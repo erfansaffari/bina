@@ -173,9 +173,14 @@ export default function MainLayout({ initialStatus = null, onNeedOnboarding = ()
   }
 
   return (
-    <div className="flex h-full bg-bina-bg overflow-hidden">
-      {/* macOS traffic-light drag area */}
-      <div className="absolute top-0 left-0 right-0 h-12 drag-region z-10" />
+    <div className="flex h-full overflow-hidden relative">
+      {/* Floating spring orbs — decorative background */}
+      <div className="orb orb-1" />
+      <div className="orb orb-2" />
+      <div className="orb orb-3" />
+
+      {/* macOS traffic-light drag area — starts after workspace switcher column */}
+      <div className="absolute top-0 left-16 right-0 h-12 drag-region z-10" />
 
       {/* Workspace switcher — leftmost column */}
       <WorkspaceSwitcher

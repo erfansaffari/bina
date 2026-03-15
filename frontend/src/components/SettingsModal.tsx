@@ -11,12 +11,6 @@ interface Props {
   onIndexCleared: () => void
 }
 
-interface Settings {
-  llm_model: string
-  similarity_threshold: number
-  max_graph_neighbours: number
-}
-
 type PullState = { status: string; percent: number; error: string | null }
 
 const MODEL_ICONS: Record<string, React.ReactNode> = {
@@ -27,29 +21,17 @@ const MODEL_ICONS: Record<string, React.ReactNode> = {
 export default function SettingsModal({ open, onClose, onIndexCleared }: Props) {
   const { loadWorkspaces } = useAppStore()
 
-  // Graph settings
-  const [settings, setSettings] = useState<Settings>({
-    llm_model: 'qwen3.5:2b',
-    similarity_threshold: 0.72,
-    max_graph_neighbours: 5,
-  })
   const [loading, setLoading]   = useState(true)
-  const [saving, setSaving]     = useState(false)
   const [clearing, setClearing] = useState(false)
-  const [saved, setSaved]       = useState(false)
 
   // Ollama models
   const [models, setModels]     = useState<ModelStatus[]>([])
   const [pulling, setPulling]   = useState<Record<string, boolean>>({})
   const [progress, setProgress] = useState<Record<string, PullState>>({})
 
-  // Moorcheh
-  const [moorchehKey, setMoorchehKey]           = useState('')
-  const [moorchehKeySet, setMoorchehKeySet]     = useState(false)
+  // Moorcheh status only (key is set server-side via .env)
   const [moorchehConnected, setMoorchehConnected] = useState(false)
-  const [testingMoorcheh, setTestingMoorcheh]   = useState(false)
-  const [savingMoorcheh, setSavingMoorcheh]     = useState(false)
-  const [moorchehSavedOk, setMoorchehSavedOk]  = useState(false)
+  const [testingMoorcheh, setTestingMoorcheh]     = useState(false)
 
   const checkModels = useCallback(async () => {
     try {
@@ -61,20 +43,14 @@ export default function SettingsModal({ open, onClose, onIndexCleared }: Props) 
   const checkMoorcheh = useCallback(async () => {
     try {
       const res = await appSettingsApi.get()
-      setMoorchehKeySet(res.moorcheh_api_key_set)
       setMoorchehConnected(res.moorcheh_connected)
-      if (res.moorcheh_api_key_set) setMoorchehKey('••••••••')
-      else setMoorchehKey('')
     } catch {}
   }, [])
 
   useEffect(() => {
     if (!open) return
     setLoading(true)
-    setSaved(false)
-    setMoorchehSavedOk(false)
     Promise.all([
-      settingsApi.get().then(s => setSettings(s)).catch(() => {}),
       checkModels(),
       checkMoorcheh(),
     ]).finally(() => setLoading(false))
@@ -100,17 +76,6 @@ export default function SettingsModal({ open, onClose, onIndexCleared }: Props) 
   }, [pulling, checkModels])
 
   if (!open) return null
-
-  async function handleSave() {
-    setSaving(true)
-    try {
-      const updated = await settingsApi.update(settings)
-      setSettings(updated)
-      setSaved(true)
-      setTimeout(() => setSaved(false), 2000)
-    } catch {}
-    setSaving(false)
-  }
 
   async function handleClearIndex() {
     const confirmed = await confirmDialog(
@@ -142,21 +107,6 @@ export default function SettingsModal({ open, onClose, onIndexCleared }: Props) 
     setTestingMoorcheh(true)
     await checkMoorcheh()
     setTestingMoorcheh(false)
-  }
-
-  async function handleSaveMoorcheh() {
-    if (!moorchehKey || moorchehKey.includes('•')) return
-    setSavingMoorcheh(true)
-    try {
-      await appSettingsApi.save({ moorcheh_api_key: moorchehKey })
-      setMoorchehKeySet(true)
-      setMoorchehKey('••••••••')
-      setMoorchehSavedOk(true)
-      setTimeout(() => setMoorchehSavedOk(false), 2000)
-      // Re-check connection status after saving
-      setTimeout(checkMoorcheh, 500)
-    } catch {}
-    setSavingMoorcheh(false)
   }
 
   const missingCount = models.filter(m => !m.installed).length
@@ -192,46 +142,29 @@ export default function SettingsModal({ open, onClose, onIndexCleared }: Props) 
               </div>
             ) : (
               <>
-                {/* ── Moorcheh API Key ───────────────────────────── */}
+                {/* ── Moorcheh Status ────────────────────────────── */}
                 <section>
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center justify-between mb-2">
                     <p className="text-xs font-medium text-bina-muted uppercase tracking-wider">
-                      Moorcheh (Optional)
+                      Moorcheh Vector Search
                     </p>
                     <div className="flex items-center gap-1.5">
                       <div className={`w-2 h-2 rounded-full ${moorchehConnected ? 'bg-green-500' : 'bg-bina-muted/40'}`} />
                       <span className="text-xs text-bina-muted">
-                        {moorchehConnected ? 'Connected' : moorchehKeySet ? 'Key set' : 'Not configured'}
+                        {moorchehConnected ? 'Connected' : 'Not connected'}
                       </span>
                     </div>
                   </div>
                   <p className="text-bina-muted/70 text-[11px] mb-3 leading-relaxed">
-                    Moorcheh is a hosted vector search service. <strong className="text-bina-muted">Optional</strong> — Bina works fully offline without it using local ChromaDB.
-                    Only needed if you explicitly set a workspace to use Moorcheh storage.
+                    Hosted vector search service configured server-side. Bina falls back to local ChromaDB automatically when unavailable.
                   </p>
-                  <input
-                    type="password"
-                    value={moorchehKey}
-                    onChange={e => setMoorchehKey(e.target.value)}
-                    placeholder="Paste your Moorcheh API key"
-                    className="w-full bg-bina-bg border border-bina-border rounded-xl px-3 py-2.5 text-bina-text text-sm placeholder:text-bina-muted/50 focus:outline-none focus:border-bina-accent transition-colors"
-                  />
-                  <div className="flex gap-2 mt-2.5">
-                    <button
-                      onClick={handleTestMoorcheh}
-                      disabled={testingMoorcheh}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium border border-bina-border text-bina-muted hover:text-bina-text hover:border-bina-accent/40 transition-colors disabled:opacity-50"
-                    >
-                      {testingMoorcheh ? 'Testing…' : 'Test connection'}
-                    </button>
-                    <button
-                      onClick={handleSaveMoorcheh}
-                      disabled={savingMoorcheh || !moorchehKey || moorchehKey.includes('•')}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium bg-bina-accent text-white hover:bg-bina-accent/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {moorchehSavedOk ? '✓ Saved' : savingMoorcheh ? 'Saving…' : 'Save key'}
-                    </button>
-                  </div>
+                  <button
+                    onClick={handleTestMoorcheh}
+                    disabled={testingMoorcheh}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-bina-border text-bina-muted hover:text-bina-text hover:border-bina-accent/40 transition-colors disabled:opacity-50"
+                  >
+                    {testingMoorcheh ? 'Testing…' : 'Test connection'}
+                  </button>
                 </section>
 
                 {/* ── Local AI Models (Ollama) ───────────────────── */}
@@ -304,49 +237,6 @@ export default function SettingsModal({ open, onClose, onIndexCleared }: Props) 
                   </div>
                 </section>
 
-                {/* ── Similarity threshold ───────────────────────── */}
-                <section>
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-xs font-medium text-bina-muted uppercase tracking-wider">
-                      Similarity Threshold
-                    </p>
-                    <span className="text-bina-accent font-mono text-sm font-medium">
-                      {settings.similarity_threshold.toFixed(2)}
-                    </span>
-                  </div>
-                  <input
-                    type="range" min={0.50} max={0.95} step={0.01}
-                    value={settings.similarity_threshold}
-                    onChange={e => setSettings(s => ({ ...s, similarity_threshold: parseFloat(e.target.value) }))}
-                    className="w-full accent-bina-accent"
-                  />
-                  <div className="flex justify-between text-bina-muted/50 text-[10px] mt-1">
-                    <span>0.50 — more connections</span>
-                    <span>0.95 — fewer, stronger</span>
-                  </div>
-                </section>
-
-                {/* ── Max neighbours ─────────────────────────────── */}
-                <section>
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-xs font-medium text-bina-muted uppercase tracking-wider">
-                      Max Graph Connections per File
-                    </p>
-                    <span className="text-bina-accent font-mono text-sm font-medium">
-                      {settings.max_graph_neighbours}
-                    </span>
-                  </div>
-                  <input
-                    type="range" min={1} max={10} step={1}
-                    value={settings.max_graph_neighbours}
-                    onChange={e => setSettings(s => ({ ...s, max_graph_neighbours: parseInt(e.target.value) }))}
-                    className="w-full accent-bina-accent"
-                  />
-                  <div className="flex justify-between text-bina-muted/50 text-[10px] mt-1">
-                    <span>1 — sparse</span><span>10 — rich</span>
-                  </div>
-                </section>
-
                 {/* ── Danger zone ────────────────────────────────── */}
                 <section className="border border-red-500/20 rounded-xl p-4 bg-red-500/5">
                   <p className="text-xs font-medium text-red-400 uppercase tracking-wider mb-1">Danger Zone</p>
@@ -373,22 +263,9 @@ export default function SettingsModal({ open, onClose, onIndexCleared }: Props) 
           {!loading && (
             <div className="px-6 py-4 border-t border-bina-border flex items-center justify-between gap-3">
               <span className="text-bina-muted/50 text-[10px]">Bina v3</span>
-              <div className="flex items-center gap-3">
-                <button onClick={onClose} className="px-4 py-2 text-sm text-bina-muted hover:text-bina-text transition-colors rounded-lg hover:bg-bina-border/40">
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={saving}
-                  className="btn-primary text-sm px-6 py-2 disabled:opacity-50"
-                >
-                  {saving ? (
-                    <span className="flex items-center gap-2">
-                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />Saving…
-                    </span>
-                  ) : saved ? '✓ Saved' : 'Save Settings'}
-                </button>
-              </div>
+              <button onClick={onClose} className="px-4 py-2 text-sm text-bina-muted hover:text-bina-text transition-colors rounded-lg hover:bg-bina-border/40">
+                Close
+              </button>
             </div>
           )}
         </div>
