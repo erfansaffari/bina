@@ -13,27 +13,7 @@ import * as d3 from 'd3'
 import type { GraphNode, GraphEdge } from '../types'
 import { openFile, showInFinder, api } from '../api'
 import { useAppStore } from '../store/appStore'
-
-// ── Spring palette ─────────────────────────────────────────────────────────────
-const COMMUNITY_PALETTE = [
-  '#6366F1', // indigo
-  '#F43F5E', // rose
-  '#10B981', // emerald
-  '#8B5CF6', // violet
-  '#3B82F6', // blue
-  '#F59E0B', // amber
-  '#06B6D4', // cyan
-  '#EC4899', // pink
-]
-function communityColor(id: number) {
-  return COMMUNITY_PALETTE[(id ?? 0) % COMMUNITY_PALETTE.length]
-}
-function hexAlpha(hex: string, a: number) {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r},${g},${b},${a})`
-}
+import { communityColor, hexAlpha } from '../utils/colorUtils'
 
 type SimNode = GraphNode & {
   x: number; y: number; vx: number; vy: number
@@ -164,7 +144,7 @@ function CommunityLegend({
                 >
                   <div
                     className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: communityColor(g.id), boxShadow: isFocused ? `0 0 6px ${communityColor(g.id)}` : undefined }}
+                    style={{ backgroundColor: communityColor(g.id, g.label), boxShadow: isFocused ? `0 0 6px ${communityColor(g.id, g.label)}` : undefined }}
                   />
                   <span className={`text-[11px] whitespace-nowrap ${isFocused ? 'text-bina-text font-medium' : 'text-bina-muted'}`}>{g.label}</span>
                   <span className="text-[10px] text-bina-muted/50 ml-auto">{g.count}</span>
@@ -187,11 +167,12 @@ interface Props {
   searchScores: Map<string, number> | null
   onNodeClick: (node: GraphNode) => void
   onNodeDeleted?: () => void
+  onBackgroundClick?: () => void
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function GraphCanvas({
-  nodes, edges, selectedNodeId, searchScores, onNodeClick, onNodeDeleted,
+  nodes, edges, selectedNodeId, searchScores, onNodeClick, onNodeDeleted, onBackgroundClick,
 }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -221,8 +202,9 @@ export default function GraphCanvas({
   const focusedGroupRef   = useRef<number | null>(null)
   const hoveredNodeRef    = useRef<SimNode | null>(null)
   const hoveredClusterRef = useRef<string | null>(null)
-  const onNodeClickRef    = useRef(onNodeClick)
-  const onNodeDeletedRef  = useRef(onNodeDeleted)
+  const onNodeClickRef       = useRef(onNodeClick)
+  const onNodeDeletedRef     = useRef(onNodeDeleted)
+  const onBackgroundClickRef = useRef(onBackgroundClick)
   const dimsRef           = useRef(dims)
   const selectedNodeIdRef = useRef(selectedNodeId)
   const searchScoresRef   = useRef(searchScores)
@@ -250,8 +232,9 @@ export default function GraphCanvas({
   const hubRectsRef      = useRef(new Map<number, { x: number; y: number; r: number }>())
 
   useEffect(() => { focusedGroupRef.current   = focusedGroup  }, [focusedGroup])
-  useEffect(() => { onNodeClickRef.current    = onNodeClick   }, [onNodeClick])
-  useEffect(() => { onNodeDeletedRef.current  = onNodeDeleted }, [onNodeDeleted])
+  useEffect(() => { onNodeClickRef.current       = onNodeClick       }, [onNodeClick])
+  useEffect(() => { onNodeDeletedRef.current     = onNodeDeleted     }, [onNodeDeleted])
+  useEffect(() => { onBackgroundClickRef.current = onBackgroundClick }, [onBackgroundClick])
   useEffect(() => { dimsRef.current           = dims          }, [dims])
   useEffect(() => { selectedNodeIdRef.current = selectedNodeId }, [selectedNodeId])
   useEffect(() => { searchScoresRef.current   = searchScores  }, [searchScores])
@@ -277,7 +260,15 @@ export default function GraphCanvas({
     const { w, h } = dimsRef.current
     const cx = w / 2, cy = h / 2, n = groupList.length
     if (!n) return
-    const radius = Math.min(cx, cy) * 0.38
+    // Compute max hub radius so we know minimum orbit circumference needed
+    const maxCount = Math.max(...groupList.map(g => g.count))
+    const maxNodeR = Math.max(28, Math.min(55, 18 + Math.sqrt(maxCount) * 4.5))
+    // Each hub needs 2*r + 28px gap; ensure orbit is wide enough to avoid overlap
+    const minOrbitR = (n * (maxNodeR * 2 + 28)) / (2 * Math.PI)
+    const radius = Math.min(
+      Math.max(minOrbitR, Math.min(cx, cy) * 0.40),
+      Math.min(cx, cy) * 0.80,
+    )
     const targets = new Map<number, { x: number; y: number }>()
     groupList.forEach((g, i) => {
       const angle = (i / n) * 2 * Math.PI - Math.PI / 2
@@ -384,38 +375,58 @@ export default function GraphCanvas({
         const pos = targets.get(g.id)
         if (!pos) return
 
-        const r     = Math.max(30, Math.min(72, 22 + Math.sqrt(g.count) * 5.5))
-        const color = communityColor(g.id)
+        const r     = Math.max(28, Math.min(55, 18 + Math.sqrt(g.count) * 4.5))
+        const color = communityColor(g.id, g.label)
 
-        // 3D sphere effect — off-center highlight
+        // Sphere gradient — subtle highlight, avoid harsh white core
         const grad = ctx.createRadialGradient(
-          pos.x - r * 0.28, pos.y - r * 0.28, r * 0.08,
+          pos.x - r * 0.30, pos.y - r * 0.30, r * 0.05,
           pos.x, pos.y, r,
         )
-        grad.addColorStop(0,   'rgba(255,255,255,0.65)')
-        grad.addColorStop(0.35, hexAlpha(color, 0.88))
-        grad.addColorStop(1,   hexAlpha(color, 0.55))
+        grad.addColorStop(0,    hexAlpha(color, 0.85))
+        grad.addColorStop(0.25, hexAlpha(color, 0.92))
+        grad.addColorStop(1,    hexAlpha(color, 0.45))
+        // Small specular dot — much softer than before
+        const spec = ctx.createRadialGradient(
+          pos.x - r * 0.28, pos.y - r * 0.30, 0,
+          pos.x - r * 0.28, pos.y - r * 0.30, r * 0.28,
+        )
+        spec.addColorStop(0,   'rgba(255,255,255,0.22)')
+        spec.addColorStop(1,   'rgba(255,255,255,0)')
 
-        // Shadow
-        ctx.shadowColor = hexAlpha(color, 0.3)
-        ctx.shadowBlur  = 20
+        ctx.shadowColor = hexAlpha(color, 0.35)
+        ctx.shadowBlur  = 18
         ctx.beginPath(); ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2)
         ctx.fillStyle = grad; ctx.fill()
+        ctx.fillStyle = spec; ctx.fill()   // overlay soft specular
         ctx.shadowBlur = 0
 
-        // Rim stroke
-        ctx.strokeStyle = hexAlpha(color, 0.35)
+        // Rim
+        ctx.strokeStyle = hexAlpha(color, 0.40)
         ctx.lineWidth   = 1.5; ctx.stroke()
 
-        // Labels
-        ctx.textAlign = 'center'; ctx.textBaseline = 'top'
-        const labelY = pos.y + r + 10
+        // Labels — positioned radially outward from canvas centre
+        const { w: ww, h: hh } = dimsRef.current
+        const wcx = ww / 2, wcy = hh / 2
+        const dx = pos.x - wcx, dy = pos.y - wcy
+        const mag = Math.sqrt(dx * dx + dy * dy) || 1
+        const nx = dx / mag, ny = dy / mag
+        const labelOff = r + 13
+        const lx = pos.x + nx * labelOff
+        const ly = pos.y + ny * labelOff
+        const align: CanvasTextAlign = Math.abs(nx) > 0.35
+          ? (nx > 0 ? 'left' : 'right')
+          : 'center'
+        ctx.textAlign = align; ctx.textBaseline = 'middle'
         ctx.font      = `600 13px -apple-system, BlinkMacSystemFont, sans-serif`
-        ctx.fillStyle = '#1E1B4B'
-        ctx.fillText(g.label, pos.x, labelY)
+        ctx.fillStyle = '#E8EDFF'
+        // Text shadow for legibility over other circles
+        ctx.shadowColor = 'rgba(0,18,25,0.55)'; ctx.shadowBlur = 6
+        ctx.fillText(g.label, lx, ly - 7)
+        ctx.shadowBlur = 0
         ctx.font      = `400 11px -apple-system, BlinkMacSystemFont, sans-serif`
-        ctx.fillStyle = '#6B7280'
-        ctx.fillText(`${g.count} files`, pos.x, labelY + 17)
+        ctx.fillStyle = 'rgba(200,210,255,0.60)'
+        ctx.fillText(`${g.count} files`, lx, ly + 7)
 
         hubRectsRef.current.set(g.id, { x: pos.x, y: pos.y, r })
       })
@@ -494,7 +505,7 @@ export default function GraphCanvas({
 
     gCentroids.forEach((c, cid) => {
       if (c.r < 1) return
-      const color = communityColor(cid)
+      const color = communityColor(cid, c.label)
       // In search mode, rings are neutral (focusedG was cleared on search start)
       const isFocus = scores === null && focusedG === cid
       const isOther = scores === null && focusedG !== null && !isFocus
@@ -509,11 +520,11 @@ export default function GraphCanvas({
       if (!isFocus) ctx.setLineDash([5, 6])
       ctx.stroke(); ctx.setLineDash([])
 
-      ctx.globalAlpha = isOther ? 0.10 : isFocus ? 0.85 : 0.50
+      ctx.globalAlpha = isOther ? 0.12 : isFocus ? 0.92 : 0.65
       const fs = Math.max(9, Math.min(13, 11 / Math.max(k * 0.5, 0.3)))
       ctx.font = `600 ${fs}px -apple-system, BlinkMacSystemFont, sans-serif`
       ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'
-      ctx.fillStyle = color
+      ctx.fillStyle = isFocus ? '#E8EDFF' : color
       ctx.fillText(c.label, c.cx, c.cy - c.r + 2)
       ctx.restore()
     })
@@ -540,7 +551,7 @@ export default function GraphCanvas({
         const x2 = tm ? tm.cx : t.x, y2 = tm ? tm.cy : t.y
         const key = `${x1.toFixed(0)},${y1.toFixed(0)}|${x2.toFixed(0)},${y2.toFixed(0)}`
         if (!aggEdges.has(key)) {
-          aggEdges.set(key, { x1, y1, x2, y2, w: 0, color: communityColor(s.community_id ?? 0) })
+          aggEdges.set(key, { x1, y1, x2, y2, w: 0, color: communityColor(s.community_id ?? 0, s.community_label) })
         }
         aggEdges.get(key)!.w += link.weight
         return
@@ -571,7 +582,7 @@ export default function GraphCanvas({
 
       ctx.save()
       ctx.globalAlpha = alpha
-      ctx.strokeStyle = communityColor(s.community_id ?? 0)
+      ctx.strokeStyle = communityColor(s.community_id ?? 0, s.community_label)
       ctx.lineWidth = cross ? link.weight * 1.2 : link.weight * 2.5
       if (link.forced || cross) ctx.setLineDash(cross ? [3, 5] : [4, 5])
       ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y)
@@ -597,7 +608,7 @@ export default function GraphCanvas({
     for (const meta of clusterMetaRef.current) {
       if (!expandedClustersRef.current.has(meta.id)) continue
       const m = cMetrics.get(meta.id); if (!m || m.r < 5) continue
-      const color = communityColor(m.groupId)
+      const color = communityColor(m.groupId, gCentroids.get(m.groupId)?.label)
       const isOther = focusedG !== null && m.groupId !== focusedG
 
       // Subtle dashed ring around expanded cluster
@@ -630,7 +641,7 @@ export default function GraphCanvas({
     for (const meta of clusterMetaRef.current) {
       if (expandedClustersRef.current.has(meta.id)) continue
       const m = cMetrics.get(meta.id); if (!m) continue
-      const color = communityColor(m.groupId)
+      const color = communityColor(m.groupId, gCentroids.get(m.groupId)?.label)
       const isHov = hCluster === meta.id
       const isOther = focusedG !== null && m.groupId !== focusedG
 
@@ -673,7 +684,7 @@ export default function GraphCanvas({
       if (hidden.has(node.id)) return
 
       const r = nodeRadius(node.id)
-      const color = communityColor(node.community_id ?? 0)
+      const color = communityColor(node.community_id ?? 0, node.community_label)
       const isSel   = node.id === selId
       const isHov   = node === hovered
       const inGroup = focusedG === null || (node.community_id ?? 0) === focusedG
@@ -732,16 +743,16 @@ export default function GraphCanvas({
         const labelY = node.y + rBoost + 5 / Math.max(k, 0.5)
         const tw     = ctx.measureText(label).width
         const pad    = 4
-        // White frosted backdrop
-        ctx.fillStyle = 'rgba(255,255,255,0.92)'
-        ctx.shadowColor = 'rgba(99,102,241,0.12)'
-        ctx.shadowBlur  = 4
+        // Dark frosted backdrop
+        ctx.fillStyle = 'rgba(8,5,20,0.80)'
+        ctx.shadowColor = 'rgba(120,80,255,0.35)'
+        ctx.shadowBlur  = 6
         ctx.beginPath()
         ctx.roundRect(node.x - tw / 2 - pad, labelY - 1, tw + pad * 2, fs + 4, 4)
         ctx.fill()
         ctx.shadowBlur = 0
-        // Dark ink text
-        ctx.fillStyle = '#1E1B4B'
+        // Light text on dark bg
+        ctx.fillStyle = '#E8EDFF'
         ctx.fillText(label, node.x, labelY)
       }
 
@@ -1098,8 +1109,9 @@ export default function GraphCanvas({
         return
       }
 
-      // Click on empty space → clear group focus
+      // Click on empty space → clear group focus + notify parent to close inspector
       setFocusedGroup(null)
+      onBackgroundClickRef.current?.()
       render()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1153,7 +1165,7 @@ export default function GraphCanvas({
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div ref={containerRef} className="w-full h-full relative" style={{ background: '#FAFBFF' }}>
+    <div ref={containerRef} className="w-full h-full relative" style={{ background: 'linear-gradient(145deg, #001219 0%, #001a24 50%, #001219 100%)' }}>
 
       <canvas
         ref={canvasRef}
@@ -1212,7 +1224,7 @@ export default function GraphCanvas({
       {focusedGroupLabel && focusedGroup !== null && (
         <div className="absolute top-4 left-4 z-20 select-none animate-fade-in">
           <div className="glass rounded-xl px-3.5 py-2 shadow-lg flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: communityColor(focusedGroup) }} />
+            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: communityColor(focusedGroup, focusedGroupLabel ?? undefined) }} />
             <span className="text-bina-text text-sm font-medium">{focusedGroupLabel}</span>
             <button
               className="ml-2 text-bina-muted hover:text-bina-text text-xs transition-colors"

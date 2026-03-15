@@ -79,7 +79,7 @@ export default function Sidebar({ status, progress, onNeedOnboarding: _onNeedOnb
 
   return (
     <div
-      className={`flex-shrink-0 border-r border-bina-border glass flex flex-col relative transition-all duration-300 ease-in-out ${
+      className={`flex-shrink-0 border-r border-bina-border glass flex flex-col relative transition-[width] duration-300 ease-in-out z-20 overflow-visible ${
         collapsed ? 'w-14' : 'w-56'
       }`}
     >

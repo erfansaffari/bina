@@ -45,11 +45,11 @@ export default function WorkspaceSwitcher({ onCreateWorkspace, onEditWorkspace }
   return (
     <div className="w-16 flex-shrink-0 flex flex-col items-center py-3 gap-2 border-r border-bina-border bg-bina-surface/60 backdrop-blur-sm">
       {/* App logo — at top, below traffic lights */}
-      <div className="flex-shrink-0 pt-10 pb-1">
+      <div className="flex-shrink-0 pt-10 pb-1 flex items-center justify-center">
         <img
           src="/logo.png"
           alt="Bina"
-          className="w-8 h-8 rounded-lg object-contain select-none"
+          className="w-10 h-10 rounded-2xl object-contain select-none"
           draggable={false}
         />
       </div>

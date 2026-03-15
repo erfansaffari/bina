@@ -17,6 +17,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-force-graph-2d": "^1.25.5",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
@@ -40,9 +42,14 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
-        "dmg",
-        "zip"
-      ]
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "public/logo.png"
     },
     "files": [
       "dist/**/*",
@@ -50,13 +57,8 @@
     ],
     "extraResources": [
       {
-        "from": "../",
-        "to": "backend",
-        "filter": [
-          "**/*.py",
-          ".venv/**/*",
-          "requirements.txt"
-        ]
+        "from": "resources/bina-api",
+        "to": "bina-api"
       }
     ]
   }

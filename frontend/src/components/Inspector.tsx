@@ -1,19 +1,8 @@
-import { X, ExternalLink, Folder, Tag, User, Building, Calendar, FolderOpen } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { X, ExternalLink, Folder, Tag, User, Building, Calendar, FolderOpen, ChevronDown, ChevronUp } from 'lucide-react'
 import { openFile, showInFinder } from '../api'
 import type { GraphNode } from '../types'
-
-const TYPE_COLORS: Record<string, string> = {
-  'Research Paper':          'bg-bina-accent/20 text-bina-accent',
-  'Lecture Notes':           'bg-cyan-500/20 text-cyan-400',
-  'Course Syllabus':         'bg-bina-green/20 text-bina-green',
-  'Assignment':              'bg-bina-yellow/20 text-bina-yellow',
-  'Meeting Notes':           'bg-bina-purple/20 text-bina-purple',
-  'Invoice':                 'bg-orange-400/20 text-orange-400',
-  'Report':                  'bg-teal-400/20 text-teal-400',
-  'Image':                   'bg-pink-500/20 text-pink-400',
-  'Photograph':              'bg-pink-500/20 text-pink-400',
-  'Other':                   'bg-bina-muted/20 text-bina-muted',
-}
+import { communityColor, hexAlpha } from '../utils/colorUtils'
 
 interface Props {
   node: GraphNode | null
@@ -23,6 +12,10 @@ interface Props {
 
 export default function Inspector({ node, open, onClose }: Props) {
   const isVisible = open && !!node
+  const [summaryExpanded, setSummaryExpanded] = useState(false)
+
+  // Collapse summary whenever the selected node changes
+  useEffect(() => { setSummaryExpanded(false) }, [node?.id])
 
   const docType  = node?.doc_type ?? 'Unknown'
   const summary  = node?.summary  ?? ''
@@ -30,14 +23,22 @@ export default function Inspector({ node, open, onClose }: Props) {
   const entities = node?.entities ?? {}
   const path     = node?.path     ?? node?.id ?? ''
 
-  const typeClass   = TYPE_COLORS[docType] ?? TYPE_COLORS['Other']
+  // Badge color derived from the node's community color — matches graph node color
+  const nodeColor = communityColor(node?.community_id ?? 0, node?.community_label)
   const hasEntities = Object.values(entities).some(arr => Array.isArray(arr) && arr.length > 0)
 
   return (
     <div
-      className={`flex-shrink-0 border-l border-bina-border glass flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${
+      className={`flex-shrink-0 flex flex-col overflow-hidden transition-all duration-300 ease-in-out ${
         isVisible ? 'w-80 opacity-100' : 'w-0 opacity-0 pointer-events-none'
       }`}
+      style={{
+        background: 'linear-gradient(160deg, rgba(255,255,255,0.92) 0%, rgba(244,252,252,0.84) 50%, rgba(255,255,255,0.88) 100%)',
+        backdropFilter: 'blur(32px) saturate(2.0)',
+        WebkitBackdropFilter: 'blur(32px) saturate(2.0)',
+        borderLeft: '1px solid rgba(10,147,150,0.20)',
+        boxShadow: '-10px 0 48px rgba(0,95,115,0.10), -2px 0 8px rgba(0,18,25,0.05)',
+      }}
     >
       {/* Minimum width wrapper prevents reflow of inner content during animation */}
       <div className="w-80 flex flex-col flex-1 overflow-hidden">
@@ -58,9 +59,16 @@ export default function Inspector({ node, open, onClose }: Props) {
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 selectable">
 
-        {/* Type badge + score */}
+        {/* Type badge + score — color matches graph node color */}
         <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${typeClass}`}>
+          <span
+            className="text-xs px-2.5 py-1 rounded-full font-medium"
+            style={{
+              backgroundColor: hexAlpha(nodeColor, 0.15),
+              color: nodeColor,
+              border: `1px solid ${hexAlpha(nodeColor, 0.30)}`,
+            }}
+          >
             {docType}
           </span>
           {(node?.score ?? 0) > 0 && (
@@ -92,7 +100,23 @@ export default function Inspector({ node, open, onClose }: Props) {
         {summary ? (
           <div>
             <p className="text-xs font-medium text-bina-muted uppercase tracking-wider mb-2">Summary</p>
-            <p className="text-bina-text/80 text-sm leading-relaxed">{summary}</p>
+            <p className="text-bina-text/80 text-sm leading-relaxed">
+              {summaryExpanded || summary.length <= 200
+                ? summary
+                : summary.slice(0, 200).trimEnd() + '…'}
+            </p>
+            {summary.length > 200 && (
+              <button
+                onClick={() => setSummaryExpanded(v => !v)}
+                className="mt-1.5 flex items-center gap-1 text-xs text-bina-accent hover:text-bina-muted transition-colors"
+              >
+                {summaryExpanded ? (
+                  <><ChevronUp className="w-3 h-3" /> Show less</>
+                ) : (
+                  <><ChevronDown className="w-3 h-3" /> Read more</>
+                )}
+              </button>
+            )}
           </div>
         ) : (
           <p className="text-bina-muted text-sm italic">No summary available</p>

@@ -14,27 +14,25 @@ let pythonProcess = null
 // Python sidecar
 // ---------------------------------------------------------------------------
 
-function findPythonAndBackend() {
+function findSidecar() {
   if (app.isPackaged) {
-    const resourcesPath = process.resourcesPath
-    return {
-      python: path.join(resourcesPath, 'backend', '.venv', 'bin', 'python3'),
-      script: path.join(resourcesPath, 'backend', 'backend', 'api.py'),
-    }
+    // Packaged: use the PyInstaller binary bundled in resources/bina-api/
+    const binary = path.join(process.resourcesPath, 'bina-api', 'bina-api')
+    return { binary, args: [String(API_PORT)] }
   }
-  // Development: use the project-level venv
+  // Development: invoke python directly
   const root = path.join(__dirname, '..', '..')
   return {
-    python: path.join(root, '.venv', 'bin', 'python3'),
-    script: path.join(root, 'backend', 'api.py'),
+    binary: path.join(root, '.venv', 'bin', 'python3'),
+    args: [path.join(root, 'backend', 'api.py'), String(API_PORT)],
   }
 }
 
 function startPythonSidecar() {
-  const { python, script } = findPythonAndBackend()
-  console.log(`[sidecar] Starting: ${python} ${script} ${API_PORT}`)
+  const { binary, args } = findSidecar()
+  console.log(`[sidecar] Starting: ${binary} ${args.join(' ')}`)
 
-  pythonProcess = spawn(python, [script, String(API_PORT)], {
+  pythonProcess = spawn(binary, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
